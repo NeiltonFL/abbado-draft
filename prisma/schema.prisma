@@ -1,0 +1,406 @@
+// Abbado Draft — Document Automation Platform
+// Prisma Schema v1.0
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// CORE: Organizations & Users
+// ============================================================
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("free") // free, pro, enterprise
+  settings  Json?    @default("{}")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users             User[]
+  apiKeys           ApiKey[]
+  templates         Template[]
+  workflows         Workflow[]
+  matters           Matter[]
+  storageAdapters   StorageAdapter[]
+  webhooks          Webhook[]
+  auditLog          AuditLogEntry[]
+  activityFeed      ActivityEntry[]
+
+  @@map("organizations")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  authId    String   @unique @map("auth_id") // Supabase Auth user ID
+  name      String
+  email     String
+  role      String   @default("user") // admin, editor, user, viewer
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org                Organization        @relation(fields: [orgId], references: [id])
+  createdMatters     Matter[]            @relation("MatterCreatedBy")
+  createdTemplates   TemplateVersion[]   @relation("TemplateVersionCreatedBy")
+  editJournalEntries EditJournalEntry[]  @relation("JournalCreatedBy")
+  resolvedConflicts  GenerationConflict[] @relation("ConflictResolvedBy")
+
+  @@unique([orgId, email])
+  @@index([orgId])
+  @@map("users")
+}
+
+model ApiKey {
+  id        String    @id @default(uuid())
+  orgId     String    @map("org_id")
+  keyHash   String    @map("key_hash") // bcrypt hash
+  keyPrefix String    @map("key_prefix") // first 8 chars for identification
+  name      String
+  scopes    Json?     @default("[]") // ["templates:read", "matters:write", etc.]
+  expiresAt DateTime? @map("expires_at")
+  isActive  Boolean   @default(true) @map("is_active")
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+  @@index([keyPrefix])
+  @@map("api_keys")
+}
+
+// ============================================================
+// TEMPLATES & WORKFLOWS
+// ============================================================
+
+model Template {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  name         String
+  description  String?
+  format       String   // docx, xlsx, pdf
+  filePath     String?  @map("file_path") // Supabase Storage path
+  fileHash     String?  @map("file_hash") // SHA-256 of the file
+  parsedSchema Json?    @map("parsed_schema") // Extracted variable schema
+  version      Int      @default(1)
+  category     String?
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  org               Organization       @relation(fields: [orgId], references: [id])
+  versions          TemplateVersion[]
+  workflowTemplates WorkflowTemplate[]
+  generatedDocs     GeneratedDocument[]
+
+  @@index([orgId])
+  @@index([orgId, format])
+  @@map("templates")
+}
+
+model TemplateVersion {
+  id            String   @id @default(uuid())
+  templateId    String   @map("template_id")
+  versionNumber Int      @map("version_number")
+  filePath      String   @map("file_path")
+  fileHash      String   @map("file_hash")
+  parsedSchema  Json?    @map("parsed_schema")
+  changeNote    String?  @map("change_note")
+  createdBy     String?  @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  template Template @relation(fields: [templateId], references: [id])
+  creator  User?    @relation("TemplateVersionCreatedBy", fields: [createdBy], references: [id])
+
+  @@unique([templateId, versionNumber])
+  @@map("template_versions")
+}
+
+model Workflow {
+  id          String   @id @default(uuid())
+  orgId       String   @map("org_id")
+  name        String
+  description String?
+  category    String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  org               Organization       @relation(fields: [orgId], references: [id])
+  templates         WorkflowTemplate[]
+  variables         Variable[]
+  interviewSections InterviewSection[]
+  matters           Matter[]
+
+  @@index([orgId])
+  @@map("workflows")
+}
+
+model WorkflowTemplate {
+  id              String @id @default(uuid())
+  workflowId      String @map("workflow_id")
+  templateId      String @map("template_id")
+  displayOrder    Int    @default(0) @map("display_order")
+  variableMapping Json?  @map("variable_mapping") // Maps template vars to workflow vars
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  template Template @relation(fields: [templateId], references: [id])
+
+  @@unique([workflowId, templateId])
+  @@index([workflowId])
+  @@map("workflow_templates")
+}
+
+model Variable {
+  id           String   @id @default(uuid())
+  workflowId   String   @map("workflow_id")
+  name         String   // e.g., "company_name", "founders.$.name"
+  displayLabel String   @map("display_label")
+  type         String   // text, number, currency, date, boolean, dropdown, multi_select, email, phone, address, rich_text
+  required     Boolean  @default(false)
+  defaultValue String?  @map("default_value")
+  validation   Json?    // { min, max, pattern, maxLength, options: [] for dropdowns }
+  helpText     String?  @map("help_text")
+  condition    String?  // JS-like expression: "entity_type == 'Corporation'"
+  groupName    String?  @map("group_name") // Groups map to interview sections
+  displayOrder Int      @default(0) @map("display_order")
+  isComputed   Boolean  @default(false) @map("is_computed")
+  expression   String?  // For computed fields: "authorized_shares - issued_shares"
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, name])
+  @@index([workflowId])
+  @@index([workflowId, groupName])
+  @@map("variables")
+}
+
+model InterviewSection {
+  id           String  @id @default(uuid())
+  workflowId   String  @map("workflow_id")
+  name         String
+  description  String?
+  displayOrder Int     @default(0) @map("display_order")
+  condition    String? // Section-level visibility condition
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@map("interview_sections")
+}
+
+// ============================================================
+// MATTERS & GENERATION
+// ============================================================
+
+model Matter {
+  id             String    @id @default(uuid())
+  orgId          String    @map("org_id")
+  workflowId     String    @map("workflow_id")
+  name           String
+  status         String    @default("draft") // draft, in_progress, complete, archived
+  variableValues Json?     @map("variable_values") @default("{}") // Current filled values
+  interviewState Json?     @map("interview_state") // { currentSection, completedSections, savedAt }
+  createdBy      String?   @map("created_by")
+  completedAt    DateTime? @map("completed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  org            Organization      @relation(fields: [orgId], references: [id])
+  workflow       Workflow           @relation(fields: [workflowId], references: [id])
+  creator        User?              @relation("MatterCreatedBy", fields: [createdBy], references: [id])
+  generatedDocs  GeneratedDocument[]
+  activityFeed   ActivityEntry[]
+
+  @@index([orgId])
+  @@index([orgId, status])
+  @@index([workflowId])
+  @@map("matters")
+}
+
+model GeneratedDocument {
+  id                   String    @id @default(uuid())
+  matterId             String    @map("matter_id")
+  templateId           String    @map("template_id")
+  filePath             String?   @map("file_path") // Storage path for the generated file
+  externalDocId        String?   @map("external_doc_id") // ID in the connected DMS (e.g., Abbado doc ID)
+  variableSnapshot     Json?     @map("variable_snapshot") // Values at generation time
+  structuralTagRegistry Json?    @map("structural_tag_registry") // Map of all tags and positions
+  generationHash       String?   @map("generation_hash") // Hash of template + variables
+  mode                 String    @default("live") // live or final
+  generatedAt          DateTime  @default(now()) @map("generated_at")
+  regeneratedAt        DateTime? @map("regenerated_at")
+  regenerationCount    Int       @default(0) @map("regeneration_count")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  matter           Matter              @relation(fields: [matterId], references: [id])
+  template         Template            @relation(fields: [templateId], references: [id])
+  editJournal      EditJournalEntry[]
+  conflicts        GenerationConflict[]
+
+  @@index([matterId])
+  @@index([matterId, templateId])
+  @@map("generated_documents")
+}
+
+model EditJournalEntry {
+  id                  String   @id @default(uuid())
+  generatedDocumentId String   @map("generated_document_id")
+  operationType       String   @map("operation_type") // INSERT_AFTER, INSERT_BEFORE, MODIFY, DELETE, MOVE, INSERT_TABLE_ROW, MODIFY_CELL
+  anchorTag           String   @map("anchor_tag") // Unique structural tag ID
+  targetTag           String?  @map("target_tag") // For MOVE: destination anchor
+  contentXml          String?  @map("content_xml") // The XML content of the edit
+  label               String?  // Human-readable description: "Added information rights clause"
+  status              String   @default("active") // active, applied, dropped
+  dropReason          String?  @map("drop_reason") // Why it was dropped during regeneration
+  createdBy           String?  @map("created_by")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  generatedDocument GeneratedDocument @relation(fields: [generatedDocumentId], references: [id])
+  creator           User?             @relation("JournalCreatedBy", fields: [createdBy], references: [id])
+
+  // Edit journal is append-only. Entries are never updated or deleted.
+  // Status changes are recorded as new entries referencing the original.
+  @@index([generatedDocumentId])
+  @@index([generatedDocumentId, status])
+  @@map("edit_journal_entries")
+}
+
+model GenerationConflict {
+  id                  String    @id @default(uuid())
+  generatedDocumentId String    @map("generated_document_id")
+  conflictType        String    @map("conflict_type") // structural_overlap, missing_anchor, content_ambiguity
+  locationDescription String?   @map("location_description")
+  details             Json?     // { affectedTags, originalContent, newContent }
+  resolved            Boolean   @default(false)
+  resolvedBy          String?   @map("resolved_by")
+  resolvedAt          DateTime? @map("resolved_at")
+  resolution          String?   // accept, reject, manual_fix
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  generatedDocument GeneratedDocument @relation(fields: [generatedDocumentId], references: [id])
+  resolver          User?             @relation("ConflictResolvedBy", fields: [resolvedBy], references: [id])
+
+  @@index([generatedDocumentId])
+  @@index([generatedDocumentId, resolved])
+  @@map("generation_conflicts")
+}
+
+// ============================================================
+// INTEGRATION: Storage Adapters
+// ============================================================
+
+model StorageAdapter {
+  id              String    @id @default(uuid())
+  orgId           String    @map("org_id")
+  adapterType     String    @map("adapter_type") // local, abbado, sharepoint, box, gdrive, clio, imanage
+  name            String
+  config          Json?     // Encrypted connection config (API URL, credentials ref, folder mapping)
+  isActive        Boolean   @default(true) @map("is_active")
+  isDefault       Boolean   @default(false) @map("is_default")
+  lastHealthCheck DateTime? @map("last_health_check")
+  healthStatus    String?   @map("health_status") // healthy, degraded, failed
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  org      Organization     @relation(fields: [orgId], references: [id])
+  syncLogs AdapterSyncLog[]
+
+  @@index([orgId])
+  @@index([orgId, isDefault])
+  @@map("storage_adapters")
+}
+
+model AdapterSyncLog {
+  id        String   @id @default(uuid())
+  adapterId String   @map("adapter_id")
+  matterId  String?  @map("matter_id")
+  action    String   // store, retrieve, replace, detect_change, create_folder, health_check
+  status    String   // success, failed, partial
+  details   Json?    // { externalDocId, error, duration_ms }
+  syncedAt  DateTime @default(now()) @map("synced_at")
+
+  adapter StorageAdapter @relation(fields: [adapterId], references: [id])
+
+  @@index([adapterId])
+  @@index([adapterId, syncedAt(sort: Desc)])
+  @@map("adapter_sync_log")
+}
+
+// ============================================================
+// WEBHOOKS
+// ============================================================
+
+model Webhook {
+  id         String   @id @default(uuid())
+  orgId      String   @map("org_id")
+  url        String
+  events     Json     @default("[]") // ["matter.created", "documents.generated", ...]
+  secretHash String?  @map("secret_hash")
+  isActive   Boolean  @default(true) @map("is_active")
+  lastFiredAt DateTime? @map("last_fired_at")
+  failCount  Int      @default(0) @map("fail_count")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+  @@map("webhooks")
+}
+
+// ============================================================
+// AUDIT & ACTIVITY
+// ============================================================
+
+model AuditLogEntry {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  userId       String?  @map("user_id")
+  action       String   // template.uploaded, workflow.created, matter.generated, variable.changed, etc.
+  resourceType String?  @map("resource_type") // template, workflow, matter, document
+  resourceId   String?  @map("resource_id")
+  details      Json?
+  ipAddress    String?  @map("ip_address")
+  timestamp    DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  // Immutable: no updates, no deletes
+  @@index([orgId, timestamp(sort: Desc)])
+  @@index([orgId, action])
+  @@index([orgId, resourceType, resourceId])
+  @@map("audit_log")
+}
+
+model ActivityEntry {
+  id           String   @id @default(uuid())
+  orgId        String   @map("org_id")
+  matterId     String?  @map("matter_id")
+  activityType String   @map("activity_type") // matter.created, documents.generated, variable.changed, journal.entry, regeneration.complete
+  actorId      String?  @map("actor_id")
+  summary      String
+  details      Json?
+  timestamp    DateTime @default(now())
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  matter Matter?      @relation(fields: [matterId], references: [id])
+
+  @@index([orgId, timestamp(sort: Desc)])
+  @@index([matterId, timestamp(sort: Desc)])
+  @@map("activity_feed")
+}
