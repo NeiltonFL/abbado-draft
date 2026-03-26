@@ -225,53 +225,17 @@ matterRoutes.post("/:id/generate", requireRole("user"), async (req, res) => {
 
     if (!matter) return res.status(404).json({ error: "Matter not found" });
 
-    const generatedDocs = [];
-
-    for (const wt of matter.workflow.templates) {
-      // TODO: Call the appropriate engine based on template format
-      // For now, create the generated document record as a placeholder
-      const genDoc = await prisma.generatedDocument.create({
-        data: {
-          matterId: matter.id,
-          templateId: wt.template.id,
-          variableSnapshot: matter.variableValues as any,
-          structuralTagRegistry: {}, // Will be populated by engine
-          mode: mode || "live",
-          generationHash: "", // Will be computed by engine
-        },
-      });
-
-      generatedDocs.push({
-        ...genDoc,
-        templateName: wt.template.name,
-        templateFormat: wt.template.format,
-      });
-    }
-
-    // Update matter status
-    await prisma.matter.update({
-      where: { id: matter.id },
-      data: { status: "complete", completedAt: new Date() },
-    });
-
-    // Log activity
-    await prisma.activityEntry.create({
-      data: {
-        orgId,
-        matterId: matter.id,
-        activityType: "documents.generated",
-        actorId: req.auth!.userId,
-        summary: `Generated ${generatedDocs.length} document(s) in ${mode || "live"} mode`,
-        details: { documentIds: generatedDocs.map((d) => d.id), mode: mode || "live" },
-      },
-    });
+    // Use the generation service
+    const { generateAllDocuments } = await import("../services/generation");
+    const result = await generateAllDocuments(matter.id, orgId, req.auth!.userId, mode || "live");
 
     await auditLog(orgId, req.auth!.userId, "matter.generated", "matter", matter.id, {
-      documentCount: generatedDocs.length,
+      documentCount: result.documents.length,
+      errorCount: result.errors.length,
       mode: mode || "live",
     });
 
-    res.json({ documents: generatedDocs });
+    res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -300,57 +264,11 @@ matterRoutes.post("/:id/regenerate", requireRole("user"), async (req, res) => {
 
     if (!matter) return res.status(404).json({ error: "Matter not found" });
 
-    const results = [];
+    // Use the regeneration service
+    const { regenerateDocuments } = await import("../services/generation");
+    const result = await regenerateDocuments(matter.id, orgId, req.auth!.userId);
 
-    for (const doc of matter.generatedDocs) {
-      // TODO: Full regeneration pipeline:
-      // 1. Generate "Clean New" from template + new variables
-      // 2. Replay edit journal: for each entry, find anchor tag → apply or drop
-      // 3. Store result via storage adapter
-      // 4. Create new version
-
-      const appliedEdits: string[] = [];
-      const droppedEdits: string[] = [];
-
-      // For now, simulate the journal replay
-      for (const entry of doc.editJournal) {
-        // In the real engine, we'd check if the anchor tag exists in Clean New
-        // For now, mark all as applied (placeholder)
-        appliedEdits.push(entry.id);
-      }
-
-      // Update the generated document record
-      await prisma.generatedDocument.update({
-        where: { id: doc.id },
-        data: {
-          variableSnapshot: matter.variableValues as any,
-          regeneratedAt: new Date(),
-          regenerationCount: { increment: 1 },
-        },
-      });
-
-      results.push({
-        documentId: doc.id,
-        templateName: doc.template.name,
-        applied: appliedEdits.length,
-        dropped: droppedEdits.length,
-        droppedDetails: [], // Will contain { entryId, reason } in real implementation
-      });
-    }
-
-    // Log activity
-    await prisma.activityEntry.create({
-      data: {
-        orgId,
-        matterId: matter.id,
-        activityType: "documents.regenerated",
-        actorId: req.auth!.userId,
-        summary: `Regenerated ${results.length} document(s)`,
-        details: { results },
-      },
-    });
-
-    res.json({ results });
+    res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }

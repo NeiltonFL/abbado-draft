@@ -5,6 +5,7 @@ import { templateRoutes } from "./routes/templates";
 import { workflowRoutes } from "./routes/workflows";
 import { matterRoutes } from "./routes/matters";
 import { adminRoutes } from "./routes/admin";
+import { engineRoutes } from "./routes/engine";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "8080");
@@ -50,6 +51,7 @@ app.use("/api/templates", authenticate, auditMiddleware, templateRoutes);
 app.use("/api/workflows", authenticate, auditMiddleware, workflowRoutes);
 app.use("/api/matters", authenticate, auditMiddleware, matterRoutes);
 app.use("/api/admin", authenticate, auditMiddleware, adminRoutes);
+app.use("/api/engine", authenticate, auditMiddleware, engineRoutes);
 
 // ── Activity feed (cross-cutting, any authenticated user) ──
 app.get("/api/activity", authenticate, async (req, res) => {
