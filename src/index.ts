@@ -31,11 +31,22 @@ app.use(
 app.use(express.json({ limit: "50mb" })); // Large for document XML payloads
 
 // ── Health check (no auth) ──
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  let dbOk = false;
+  let dbError = "";
+  try {
+    const { default: prisma } = await import("./lib/prisma");
+    await prisma.$queryRaw`SELECT 1`;
+    dbOk = true;
+  } catch (err: any) {
+    dbError = err.message;
+  }
+
   res.json({
-    status: "healthy",
+    status: dbOk ? "healthy" : "degraded",
     service: "abbado-draft-api",
     version: "1.0.0",
+    database: dbOk ? "connected" : `error: ${dbError}`,
     timestamp: new Date().toISOString(),
   });
 });
