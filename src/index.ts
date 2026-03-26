@@ -6,6 +6,7 @@ import { workflowRoutes } from "./routes/workflows";
 import { matterRoutes } from "./routes/matters";
 import { adminRoutes } from "./routes/admin";
 import { engineRoutes } from "./routes/engine";
+import { authRoutes } from "./routes/auth";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "8080");
@@ -39,12 +40,8 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ── Public auth endpoints (no auth middleware) ──
-// TODO: Registration, org creation, invite acceptance
-app.post("/api/auth/register", async (req, res) => {
-  // Placeholder — will handle org creation + first admin user
-  res.status(501).json({ error: "Not implemented yet" });
-});
+// ── Auth routes (register + accept-invite are public, sync + me require auth) ──
+app.use("/api/auth", authRoutes);
 
 // ── Protected routes (all require auth) ──
 app.use("/api/templates", authenticate, auditMiddleware, templateRoutes);
