@@ -31,7 +31,10 @@ function evaluateCondition(expression: string, values: Record<string, any>, curr
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&apos;/g, "'");
+    .replace(/&apos;/g, "'")
+    // Normalize curly/smart quotes to straight ASCII quotes
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'");
 
   // Match: varName operator "value" or varName operator value
   const compMatch = expr.match(/^(\S+)\s*(==|!=|>=|<=|>|<)\s*["']?([^"']*)["']?\s*$/);
@@ -154,19 +157,21 @@ function processConditionals(xml: string, values: Record<string, any>, currentIt
   let result = xml;
   let changed = true;
   let iterations = 0;
-  const maxIterations = 50; // Safety limit
+  const maxIterations = 200; // Higher limit for deeply nested templates
 
   while (changed && iterations < maxIterations) {
     changed = false;
     iterations++;
 
-    // Match innermost {{#if}}...{{/if}} (no nested #if inside)
-    const ifElsePattern = /\{\{#if\s+(.+?)\}\}([\s\S]*?)\{\{else\}\}([\s\S]*?)\{\{\/if\}\}/;
-    const ifOnlyPattern = /\{\{#if\s+(.+?)\}\}([\s\S]*?)\{\{\/if\}\}/;
+    // Match TRULY innermost blocks using negative lookahead:
+    // Content must NOT contain {{#if — this guarantees we process innermost first
+    // Condition capture uses [^}]+ to prevent crossing }} delimiters
+    const innerIfElse = /\{\{#if\s+([^}]+)\}\}((?:(?!\{\{#if)[\s\S])*?)\{\{else\}\}((?:(?!\{\{#if)[\s\S])*?)\{\{\/if\}\}/;
+    const innerIfOnly = /\{\{#if\s+([^}]+)\}\}((?:(?!\{\{#if)[\s\S])*?)\{\{\/if\}\}/;
 
     // Try if/else first
-    const elseMatch = result.match(ifElsePattern);
-    if (elseMatch && !elseMatch[2].includes("{{#if")) {
+    const elseMatch = result.match(innerIfElse);
+    if (elseMatch) {
       const condition = elseMatch[1];
       const trueContent = elseMatch[2];
       const falseContent = elseMatch[3];
@@ -178,8 +183,8 @@ function processConditionals(xml: string, values: Record<string, any>, currentIt
     }
 
     // Try if-only
-    const ifMatch = result.match(ifOnlyPattern);
-    if (ifMatch && !ifMatch[2].includes("{{#if")) {
+    const ifMatch = result.match(innerIfOnly);
+    if (ifMatch) {
       const condition = ifMatch[1];
       const content = ifMatch[2];
 
