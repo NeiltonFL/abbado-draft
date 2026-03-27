@@ -480,9 +480,10 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
       { name: "designee_phone", displayLabel: "Designee Phone", type: "text", required: false, groupName: "Designee", displayOrder: 84, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "has_designee", operator: "eq", value: "true", negate: false }] }] }) },
 
       // ── Computed / Hidden Variables ──
-      { name: "all_directors_text", displayLabel: "Directors List (natural language)", type: "computed", isComputed: true, displayOrder: 200, validation: { logicType: "formula", formula: "Computed by preprocessValues: builds 'Name1, Name2, and Name3 are' from founders with board_yn=true + non-founder directors" }, expression: "auto" },
-      { name: "all_directors_count", displayLabel: "Director Count", type: "computed", isComputed: true, displayOrder: 201, validation: { logicType: "formula", formula: "count(directors)" }, expression: "auto" },
-      { name: "shares_to_issue", displayLabel: "Total Shares to Issue", type: "computed", isComputed: true, displayOrder: 202, validation: { logicType: "formula", formula: "sum(founders.$.founder_shares)" }, expression: "auto" },
+      // These are computed by preprocessValues() at generation time, not by the Logic tab formula evaluator
+      { name: "all_directors_text", displayLabel: "Directors List (natural language)", type: "computed", isComputed: true, displayOrder: 200, validation: { logicType: "formula", formula: "Builds 'Name1, Name2, and Name3 are' from founders with board_yn + non-founder directors" }, expression: null },
+      { name: "all_directors_count", displayLabel: "Director Count", type: "computed", isComputed: true, displayOrder: 201, validation: { logicType: "formula", formula: "count(directors)" }, expression: null },
+      { name: "shares_to_issue", displayLabel: "Total Shares to Issue", type: "computed", isComputed: true, displayOrder: 202, validation: { logicType: "formula", formula: "sum(founders.$.founder_shares)" }, expression: null },
     ];
 
     for (const v of variables) {
