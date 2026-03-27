@@ -2,6 +2,8 @@ import prisma from "../lib/prisma";
 import { supabase } from "../lib/supabase";
 import { generateDocument } from "../engines/word";
 import type { GenerationOptions } from "../engines/word";
+import { fillPdfForm } from "../engines/pdf";
+import type { PdfFieldMapping } from "../engines/pdf";
 import { evaluateLogicVariables, shouldGenerateDocument } from "./logic";
 
 // ── Types ──
@@ -221,26 +223,60 @@ export async function generateAllDocuments(
             mode,
           });
         }
-      } else {
-        // PDF and Excel engines — placeholder for now
+      } else if (template.format === "pdf") {
+        // ── PDF Form Filling Engine ──
+        const templateBuffer = await fetchTemplateFile(template.filePath);
+
+        if (!templateBuffer) {
+          const genDoc = await prisma.generatedDocument.create({
+            data: { matterId: matter.id, templateId: template.id, variableSnapshot: values, structuralTagRegistry: {}, mode, generationHash: "" },
+          });
+          results.documents.push({ id: genDoc.id, templateName: template.name, templateFormat: template.format, filePath: null, mode });
+          continue;
+        }
+
+        // Get field mappings from workflow template config
+        const pdfMappings = (mapping?.pdfFieldMappings || []) as PdfFieldMapping[];
+        if (pdfMappings.length === 0) {
+          results.skipped.push({ templateId: template.id, templateName: template.name, reason: "No PDF field mappings configured" });
+          continue;
+        }
+
+        const fillResult = await fillPdfForm(templateBuffer, {
+          values,
+          fieldMappings: pdfMappings,
+          flatten: mode === "final",
+        });
+
+        const storagePath = `generated/${matter.id}/${template.id}/${mode}_${Date.now()}.pdf`;
+        const { error: uploadError } = await supabase.storage
+          .from("draft-documents")
+          .upload(storagePath, fillResult.buffer, {
+            contentType: "application/pdf",
+            upsert: true,
+          });
+
+        if (uploadError) throw new Error(`Storage upload failed: ${uploadError.message}`);
+
         const genDoc = await prisma.generatedDocument.create({
           data: {
             matterId: matter.id,
             templateId: template.id,
-            variableSnapshot: values,
+            filePath: storagePath,
+            variableSnapshot: { ...values, _pdfFilled: fillResult.filledFields, _pdfSkipped: fillResult.skippedFields },
             structuralTagRegistry: {},
-            mode,
             generationHash: "",
+            mode,
           },
         });
 
-        results.documents.push({
-          id: genDoc.id,
-          templateName: template.name,
-          templateFormat: template.format,
-          filePath: null,
-          mode,
+        results.documents.push({ id: genDoc.id, templateName: template.name, templateFormat: template.format, filePath: storagePath, mode });
+      } else {
+        // Excel and other engines — placeholder
+        const genDoc = await prisma.generatedDocument.create({
+          data: { matterId: matter.id, templateId: template.id, variableSnapshot: values, structuralTagRegistry: {}, mode, generationHash: "" },
         });
+        results.documents.push({ id: genDoc.id, templateName: template.name, templateFormat: template.format, filePath: null, mode });
       }
     } catch (err: any) {
       results.errors.push({
@@ -634,6 +670,25 @@ function preprocessValues(
       }
     }
   }
+
+  // ── SS-4 PDF computed fields ──
+  // These combine address components into the format the IRS form expects
+  const street = result.company_street || "";
+  const suite = result.company_number || "";
+  result.company_street_full = suite ? `${street}, ${suite}` : street;
+  result.company_city_state_zip = [result.company_city, result.company_state].filter(Boolean).join(", ") + (result.company_zip ? ` ${result.company_zip}` : "");
+  result.company_county_state = [result.company_county, result.company_state].filter(Boolean).join(", ");
+  result.company_secretary_name_title = result.company_secretary_name ? `${result.company_secretary_name}, Secretary` : "";
+
+  // Incorporator full address as single line
+  const incStreet = result.incorporator_street || "";
+  const incSuite = result.incorporator_number || "";
+  result.incorporator_full_address = [
+    incSuite ? `${incStreet}, ${incSuite}` : incStreet,
+    result.incorporator_city,
+    result.incorporator_state,
+    result.incorporator_zip,
+  ].filter(Boolean).join(", ");
 
   // Build all_directors list from founders + non-founder directors
   const directorNames: string[] = [];

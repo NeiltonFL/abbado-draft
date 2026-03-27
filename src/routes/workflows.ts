@@ -497,18 +497,67 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
     }
 
     // ── Upload converted templates and link to workflow ──
-    const templateFiles = [
+    const ss4FieldMappings = [
+      // Line 1: Legal name
+      { pdfField: "1 Legal name of entity or individual for whom the EIN is being requested", value: "company_name", type: "variable" },
+      // Line 3: Care of — designee
+      { pdfField: "3 Executor administrator trustee care of name", value: "designee", type: "variable" },
+      // Line 4a: Mailing address
+      { pdfField: "4a Mailing address room apt suite no and street or PO box", value: "company_street_full", type: "variable" },
+      // Line 4b: City, state, ZIP
+      { pdfField: "4b City state and ZIP code if foreign see instructions", value: "company_city_state_zip", type: "variable" },
+      // Line 6: County and state
+      { pdfField: "6 County and state where principal business is located", value: "company_county_state", type: "variable" },
+      // Line 7a: Responsible party (CEO)
+      { pdfField: "7a Name of responsible party", value: "company_ceo_name", type: "variable" },
+      // Line 8a: Is this for an LLC? — No
+      { pdfField: "Check Box27", value: "false", type: "checkbox", checkedWhen: "false" },
+      // Line 9a: Corporation checkbox
+      { pdfField: "Check Box23", value: "true", type: "checkbox", checkedWhen: "true" },
+      // Line 9a: Corporation form number (1120)
+      { pdfField: "Type of entity check only one box Caution If 8a is Yes see the instructions for the correct box to check", value: "1120", type: "literal" },
+      // Line 9b: State of incorporation
+      { pdfField: "State", value: "Delaware", type: "literal" },
+      // Line 10: Started new business — check the checkbox
+      { pdfField: "Check Box29", value: "true", type: "checkbox", checkedWhen: "true" },
+      // Line 10: Business type description
+      { pdfField: "undefined_3", value: "business_description", type: "variable" },
+      // Line 11: Date business started
+      { pdfField: "11 Date business started or acquired month day year See instructions", value: "incorporation_date", type: "date", dateFormat: "short" },
+      // Line 12: Closing month of accounting year
+      { pdfField: "12 Closing month of accounting year", value: "December", type: "literal" },
+      // Line 13: Employees — all zeros
+      { pdfField: "Agricultural", value: "0", type: "literal" },
+      { pdfField: "Household", value: "0", type: "literal" },
+      { pdfField: "undefined_4", value: "0", type: "literal" },
+      // Line 17: Principal line of merchandise/services
+      { pdfField: "undefined_9", value: "business_description", type: "variable" },
+      // Line 18: Has applicant ever applied for EIN? — No
+      { pdfField: "undefined_14", value: "false", type: "checkbox", checkedWhen: "false" },
+      // Third Party Designee
+      { pdfField: "Designees name", value: "designee", type: "variable" },
+      { pdfField: "Designees telephone number include area code", value: "designee_phone", type: "variable" },
+      { pdfField: "Address and ZIP code", value: "designee_address", type: "variable" },
+      // Applicant (Secretary) phone
+      { pdfField: "Applicants telephone number include area code", value: "company_secretary_phone", type: "variable" },
+      // Name and title line at bottom
+      { pdfField: "Form SS4 Rev December 2023 Department of the Treasury Internal Revenue ServiceRow1", value: "company_secretary_name_title", type: "variable" },
+    ];
+
+    const templateFiles: { file: string; name: string; desc: string; order: number; repeatOver?: string; pdfFieldMappings?: any[] }[] = [
       { file: "certificate_of_incorporation.docx", name: "Certificate of Incorporation", desc: "Delaware C-Corp formation certificate", order: 1 },
       { file: "action_of_incorporator.docx", name: "Action of Incorporator", desc: "Written consent appointing initial directors", order: 2 },
       { file: "initial_bylaws.docx", name: "Initial Bylaws", desc: "Corporation bylaws adopted at formation", order: 3 },
       { file: "organizational_board_consent.docx", name: "Organizational Board Consent", desc: "Board resolution authorizing officers, stock issuance, and initial actions", order: 4 },
       { file: "ss4_authorization.docx", name: "SS-4 Authorization", desc: "Authorization for third-party designee to apply for EIN", order: 5 },
-      { file: "founder_rspa.docx", name: "Founder RSPA", desc: "Restricted Stock Purchase Agreement — generated per founder", order: 6, repeatOver: "founders" },
-      { file: "founder_eiaca.docx", name: "Founder EIACA", desc: "Employee Invention Assignment & Confidentiality Agreement — generated per founder", order: 7, repeatOver: "founders" },
-      { file: "founder_83b.docx", name: "83(b) Election", desc: "IRS Section 83(b) election form — generated per founder", order: 8, repeatOver: "founders" },
+      { file: "form_ss4.pdf", name: "Form SS-4", desc: "IRS Application for Employer Identification Number — auto-filled PDF form", order: 6, pdfFieldMappings: ss4FieldMappings },
+      { file: "founder_rspa.docx", name: "Founder RSPA", desc: "Restricted Stock Purchase Agreement — generated per founder", order: 7, repeatOver: "founders" },
+      { file: "founder_eiaca.docx", name: "Founder EIACA", desc: "Employee Invention Assignment & Confidentiality Agreement — generated per founder", order: 8, repeatOver: "founders" },
+      { file: "founder_83b.docx", name: "83(b) Election", desc: "IRS Section 83(b) election form — generated per founder", order: 9, repeatOver: "founders" },
     ];
 
     const { parseTemplate } = await import("../engines/word");
+    const { parsePdfFields } = await import("../engines/pdf");
 
     for (const tmpl of templateFiles) {
       // Read template from bundled templates directory
@@ -522,11 +571,15 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
         continue;
       }
 
+      const format = tmpl.file.endsWith(".pdf") ? "pdf" : "docx";
+      const contentType = format === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       const storagePath = `templates/${orgId}/${workflow.id}/${tmpl.file}`;
-      const schema = await parseTemplate(buffer);
+      const schema = format === "pdf"
+        ? { format: "pdf", fields: await parsePdfFields(buffer) }
+        : await parseTemplate(buffer);
 
       await supabase.storage.from("draft-documents").upload(storagePath, buffer, {
-        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        contentType,
         upsert: true,
       });
 
@@ -535,7 +588,7 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
           orgId,
           name: tmpl.name,
           description: tmpl.desc,
-          format: "docx",
+          format,
           filePath: storagePath,
           parsedSchema: schema as any,
         },
@@ -553,20 +606,24 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
         },
       });
 
-      // Link to workflow with optional repeatOver
+      // Link to workflow with optional repeatOver and pdfFieldMappings
+      const variableMapping: any = {};
+      if (tmpl.repeatOver) variableMapping.repeatOver = tmpl.repeatOver;
+      if (tmpl.pdfFieldMappings) variableMapping.pdfFieldMappings = tmpl.pdfFieldMappings;
+
       await prisma.workflowTemplate.create({
         data: {
           workflowId: workflow.id,
           templateId: template.id,
           displayOrder: tmpl.order,
-          variableMapping: tmpl.repeatOver ? { repeatOver: tmpl.repeatOver } : {},
+          variableMapping: Object.keys(variableMapping).length > 0 ? variableMapping : {},
         },
       });
     }
 
     res.status(201).json({
       workflow,
-      message: `Demo workflow "Delaware Incorporation" created with 8 interview pages, ${variables.length} questions/variables, and ${templateFiles.length} document templates (including 3 per-founder). Delete existing demo workflows first if re-seeding.`,
+      message: `Demo workflow "Delaware Incorporation" created with 8 interview pages, ${variables.length} questions/variables, and ${templateFiles.length} document templates (including 3 per-founder + SS-4 PDF). Delete existing demo workflows first if re-seeding.`,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });

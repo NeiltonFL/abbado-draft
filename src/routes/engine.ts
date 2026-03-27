@@ -4,10 +4,11 @@ import prisma from "../lib/prisma";
 import { requireRole, getScope, auditLog } from "../middleware/auth";
 import { parseTemplate } from "../engines/word";
 import { readGeneratedDocument } from "../engines/word";
+import { parsePdfFields } from "../engines/pdf";
 
 export const engineRoutes = Router();
 
-// ── Parse a template file (upload .docx and extract variable schema) ──
+// ── Parse a template file (upload .docx or .pdf and extract variable/field schema) ──
 engineRoutes.post("/parse-template", requireRole("editor"), async (req, res) => {
   try {
     const { orgId } = getScope(req);
@@ -23,8 +24,26 @@ engineRoutes.post("/parse-template", requireRole("editor"), async (req, res) => 
 
     // Determine format from extension
     const ext = fileName.split(".").pop()?.toLowerCase();
+
+    if (ext === "pdf") {
+      // Parse PDF form fields
+      const fields = await parsePdfFields(buffer);
+      const schema = {
+        format: "pdf",
+        fields,
+        variableNames: fields.map(f => f.name),
+      };
+
+      // If a templateId was provided, update the template's parsed schema
+      if (templateId) {
+        await prisma.template.update({ where: { id: templateId }, data: { parsedSchema: schema as any } });
+      }
+
+      return res.json(schema);
+    }
+
     if (ext !== "docx") {
-      return res.status(400).json({ error: "Only .docx files are supported for parsing currently" });
+      return res.status(400).json({ error: "Only .docx and .pdf files are supported for parsing" });
     }
 
     // Parse the template
