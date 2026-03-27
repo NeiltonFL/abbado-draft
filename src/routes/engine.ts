@@ -134,7 +134,7 @@ engineRoutes.post("/detect-changes", requireRole("user"), async (req, res) => {
   }
 });
 
-// ── Generate a signed download URL for a generated document ──
+// ── Download a generated document (proxied for proper filename) ──
 engineRoutes.get("/download/:docId", async (req, res) => {
   try {
     const { orgId } = getScope(req);
@@ -155,22 +155,26 @@ engineRoutes.get("/download/:docId", async (req, res) => {
       return res.status(404).json({ error: "No file generated yet" });
     }
 
-    // Generate signed URL (5 minute expiry)
+    // Download the file from Supabase storage
     const { data, error } = await supabase.storage
       .from("draft-documents")
-      .createSignedUrl(genDoc.filePath, 300);
+      .download(genDoc.filePath);
 
     if (error || !data) {
-      return res.status(500).json({ error: "Failed to generate download URL" });
+      return res.status(500).json({ error: "Failed to download file" });
     }
 
     const displayName = (genDoc.variableSnapshot as any)?._displayName || genDoc.template.name;
+    const safeFileName = displayName.replace(/[^a-zA-Z0-9_\-. ()]/g, "").trim() || genDoc.template.name;
+    const ext = genDoc.template.format || "docx";
+    const contentType = ext === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-    res.json({
-      url: data.signedUrl,
-      fileName: `${displayName}.${genDoc.template.format}`,
-      expiresIn: 300,
-    });
+    // Stream the file to the client with proper Content-Disposition
+    const buffer = Buffer.from(await data.arrayBuffer());
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFileName}.${ext}"`);
+    res.setHeader("Content-Length", buffer.length);
+    res.send(buffer);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
