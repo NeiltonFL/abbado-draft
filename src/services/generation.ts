@@ -2,6 +2,7 @@ import prisma from "../lib/prisma";
 import { supabase } from "../lib/supabase";
 import { generateDocument } from "../engines/word";
 import type { GenerationOptions } from "../engines/word";
+import { evaluateLogicVariables, shouldGenerateDocument } from "./logic";
 
 // ── Types ──
 
@@ -13,6 +14,7 @@ export interface GenerateAllResult {
     filePath: string | null;
     mode: string;
   }[];
+  skipped: { templateId: string; templateName: string; reason: string }[];
   errors: { templateId: string; error: string }[];
 }
 
@@ -24,7 +26,7 @@ export async function generateAllDocuments(
   userId: string,
   mode: "live" | "final" = "live"
 ): Promise<GenerateAllResult> {
-  // Load matter with workflow and templates
+  // Load matter with workflow, templates, AND workflow variables (for logic evaluation)
   const matter = await prisma.matter.findFirst({
     where: { id: matterId, orgId },
     include: {
@@ -34,6 +36,9 @@ export async function generateAllDocuments(
             include: { template: true },
             orderBy: { displayOrder: "asc" },
           },
+          variables: {
+            orderBy: { displayOrder: "asc" },
+          },
         },
       },
     },
@@ -41,11 +46,39 @@ export async function generateAllDocuments(
 
   if (!matter) throw new Error("Matter not found");
 
-  const values = (matter.variableValues as Record<string, any>) || {};
-  const results: GenerateAllResult = { documents: [], errors: [] };
+  const interviewValues = (matter.variableValues as Record<string, any>) || {};
+
+  // ── Evaluate Logic tab hidden variables ──
+  const computedValues = evaluateLogicVariables(
+    matter.workflow.variables.map((v: any) => ({
+      name: v.name,
+      type: v.type,
+      isComputed: v.isComputed,
+      validation: v.validation,
+      expression: v.expression,
+    })),
+    interviewValues
+  );
+
+  // Merge: interview values + computed logic values
+  const values = { ...interviewValues, ...computedValues };
+
+  const results: GenerateAllResult = { documents: [], skipped: [], errors: [] };
 
   for (const wt of matter.workflow.templates) {
     const template = wt.template;
+
+    // ── Check document output condition ──
+    const mapping = wt.variableMapping as any;
+    const generateCondition = mapping?.generateCondition;
+    if (!shouldGenerateDocument(generateCondition, values)) {
+      results.skipped.push({
+        templateId: template.id,
+        templateName: template.name,
+        reason: "Document condition not met",
+      });
+      continue;
+    }
 
     try {
       if (template.format === "docx") {

@@ -154,3 +154,99 @@ engineRoutes.get("/download/:docId", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Generate a sample .docx template from workflow variables ──
+engineRoutes.post("/sample-template/:workflowId", async (req, res) => {
+  try {
+    const { orgId } = getScope(req);
+
+    const workflow = await prisma.workflow.findFirst({
+      where: { id: req.params.workflowId, orgId },
+      include: {
+        variables: { orderBy: [{ groupName: "asc" }, { displayOrder: "asc" }] },
+      },
+    });
+
+    if (!workflow) return res.status(404).json({ error: "Workflow not found" });
+
+    const JSZip = (await import("jszip")).default;
+    const zip = new JSZip();
+
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const b = "<w:rPr><w:b/></w:rPr>";
+    const bLg = '<w:rPr><w:b/><w:sz w:val="36"/></w:rPr>';
+
+    const p = (text: string, bold?: boolean) =>
+      `<w:p><w:r>${bold ? b : ""}<w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+    // Group variables
+    const pages: Record<string, typeof workflow.variables> = {};
+    const subQuestions: Record<string, typeof workflow.variables> = {};
+
+    for (const v of workflow.variables) {
+      if (v.isComputed || v.type === "computed") continue;
+      const dotMatch = v.name.match(/^(.+)\.\$\.(.+)$/);
+      if (dotMatch) {
+        if (!subQuestions[dotMatch[1]]) subQuestions[dotMatch[1]] = [];
+        subQuestions[dotMatch[1]].push(v);
+        continue;
+      }
+      const page = v.groupName || "General";
+      if (!pages[page]) pages[page] = [];
+      pages[page].push(v);
+    }
+
+    const bodyParts: string[] = [];
+
+    bodyParts.push(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r>${bLg}<w:t>${workflow.name}</w:t></w:r></w:p>`);
+    bodyParts.push("<w:p/>");
+
+    for (const [pageName, vars] of Object.entries(pages)) {
+      bodyParts.push(p(pageName.toUpperCase(), true));
+      bodyParts.push("<w:p/>");
+
+      for (const v of vars) {
+        if (v.type === "repeating") {
+          const subs = subQuestions[v.name] || [];
+          if (subs.length > 0) {
+            bodyParts.push(p(`${v.displayLabel}:`, true));
+            bodyParts.push(p(`{{#each ${v.name}}}`));
+            const fields = subs.map((s: any) => {
+              const field = s.name.split(".$.")[1];
+              return `${s.displayLabel}: {{this.${field}}}`;
+            }).join(" | ");
+            bodyParts.push(p(`  {{@index}}. ${fields}`));
+            bodyParts.push(p(`{{/each}}`));
+          }
+        } else if (v.type === "info") {
+          // Skip info blocks in the template
+        } else {
+          bodyParts.push(p(`${v.displayLabel}: {{${v.name}}}`));
+        }
+      }
+      bodyParts.push("<w:p/>");
+    }
+
+    bodyParts.push("<w:p/>");
+    bodyParts.push(p("_____________________________"));
+    bodyParts.push(p("Signature"));
+
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${bodyParts.join("")}</w:body></w:document>`;
+    const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+    const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
+    const wordRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+
+    zip.file("[Content_Types].xml", contentTypes);
+    zip.file("_rels/.rels", rels);
+    zip.file("word/_rels/document.xml.rels", wordRels);
+    zip.file("word/document.xml", documentXml);
+
+    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Disposition", `attachment; filename="${workflow.name.replace(/[^a-zA-Z0-9]/g, "_")}_template.docx"`);
+    res.send(buffer);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
