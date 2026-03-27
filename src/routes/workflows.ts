@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { requireRole, getScope, auditLog } from "../middleware/auth";
+import { supabase } from "../lib/supabase";
 
 export const workflowRoutes = Router();
 
@@ -342,6 +343,215 @@ workflowRoutes.post("/:id/duplicate", requireRole("editor"), async (req, res) =>
     ]);
 
     res.status(201).json(newWorkflow);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Seed demo workflow (Delaware Incorporation) ──
+workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
+  try {
+    const { orgId } = getScope(req);
+
+    // Create workflow
+    const workflow = await prisma.workflow.create({
+      data: {
+        orgId,
+        name: "Delaware Corporation Formation",
+        description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation with conditional indemnification and repeating founder blocks.",
+        category: "Corporate Formation",
+        status: "active",
+      },
+    });
+
+    // Create interview sections (pages)
+    const sections = [
+      { name: "Company Information", description: JSON.stringify({ section: "Company Details", text: "Basic information about the corporation being formed." }), displayOrder: 0 },
+      { name: "Registered Agent", description: JSON.stringify({ section: "Company Details", text: "The registered agent receives legal documents on behalf of the corporation." }), displayOrder: 1 },
+      { name: "Stock Structure", description: JSON.stringify({ section: "Equity", text: "Define the authorized shares and par value." }), displayOrder: 2 },
+      { name: "Founders", description: JSON.stringify({ section: "Equity", text: "Add each founder and their share allocation." }), displayOrder: 3 },
+      { name: "Additional Provisions", description: JSON.stringify({ section: "Legal", text: "Optional legal provisions for the certificate." }), displayOrder: 4 },
+    ];
+
+    for (const s of sections) {
+      await prisma.interviewSection.create({
+        data: { workflowId: workflow.id, ...s },
+      });
+    }
+
+    // Create variables (questions)
+    const variables = [
+      // Company Information page
+      { name: "company_name", displayLabel: "Legal Name of the Corporation", type: "text", required: true, groupName: "Company Information", displayOrder: 0, helpText: "Must match exactly what will appear on the Certificate of Incorporation." },
+      { name: "state", displayLabel: "State of Incorporation", type: "state", required: true, groupName: "Company Information", displayOrder: 1, defaultValue: "DE" },
+      { name: "business_purpose", displayLabel: "Nature of Business", type: "rich_text", required: true, groupName: "Company Information", displayOrder: 2, helpText: "Describe the business activities. For a broad purpose, use: 'any lawful act or activity for which corporations may be organized under the General Corporation Law of Delaware.'" },
+      { name: "formation_date", displayLabel: "Formation Date", type: "date", required: true, groupName: "Company Information", displayOrder: 3 },
+
+      // Registered Agent page
+      { name: "registered_agent_name", displayLabel: "Registered Agent Name", type: "text", required: true, groupName: "Registered Agent", displayOrder: 10, helpText: "The person or company that will receive legal documents on behalf of the corporation in the state of incorporation." },
+      { name: "registered_agent_address", displayLabel: "Registered Agent Address", type: "address", required: true, groupName: "Registered Agent", displayOrder: 11 },
+
+      // Stock Structure page
+      { name: "authorized_shares", displayLabel: "Total Authorized Shares", type: "number", required: true, groupName: "Stock Structure", displayOrder: 20, defaultValue: "10000000", helpText: "Common number for startups: 10,000,000", validation: { min: 1 } },
+      { name: "par_value", displayLabel: "Par Value per Share ($)", type: "currency", required: true, groupName: "Stock Structure", displayOrder: 21, defaultValue: "0.0001", helpText: "Standard par value for Delaware corporations: $0.0001" },
+
+      // Founders (repeating item + sub-questions)
+      { name: "founders", displayLabel: "Founders", type: "repeating", required: true, groupName: "Founders", displayOrder: 30, validation: { itemLabel: "Founder", minItems: 1, maxItems: 10, subQuestions: [
+        { field: "name", label: "Full Legal Name", type: "text", required: true },
+        { field: "email", label: "Email Address", type: "email", required: true },
+        { field: "title", label: "Title", type: "dropdown", required: false, validation: { options: ["CEO", "CTO", "COO", "CFO", "President", "Secretary", "Director", "Other"] } },
+        { field: "shares", label: "Number of Shares", type: "number", required: true, validation: { min: 1 } },
+        { field: "vesting", label: "Subject to Vesting?", type: "boolean", required: false },
+        { field: "vesting_months", label: "Vesting Period (months)", type: "number", required: false, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "vesting", operator: "eq", value: "true", negate: false }] }] }) },
+      ] } },
+      // Sub-questions (flattened)
+      { name: "founders.$.name", displayLabel: "Full Legal Name", type: "text", required: true, groupName: "Founders", displayOrder: 31 },
+      { name: "founders.$.email", displayLabel: "Email Address", type: "email", required: true, groupName: "Founders", displayOrder: 32 },
+      { name: "founders.$.title", displayLabel: "Title", type: "dropdown", required: false, groupName: "Founders", displayOrder: 33, validation: { options: ["CEO", "CTO", "COO", "CFO", "President", "Secretary", "Director", "Other"] } },
+      { name: "founders.$.shares", displayLabel: "Number of Shares", type: "number", required: true, groupName: "Founders", displayOrder: 34, validation: { min: 1 } },
+      { name: "founders.$.vesting", displayLabel: "Subject to Vesting?", type: "boolean", required: false, groupName: "Founders", displayOrder: 35 },
+      { name: "founders.$.vesting_months", displayLabel: "Vesting Period (months)", type: "number", required: false, groupName: "Founders", displayOrder: 36, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "vesting", operator: "eq", value: "true", negate: false }] }] }) },
+
+      // Additional Provisions page
+      { name: "incorporator_name", displayLabel: "Incorporator Name", type: "text", required: true, groupName: "Additional Provisions", displayOrder: 40 },
+      { name: "incorporator_address", displayLabel: "Incorporator Mailing Address", type: "text", required: true, groupName: "Additional Provisions", displayOrder: 41 },
+      { name: "has_indemnification", displayLabel: "Include Indemnification Provision?", type: "boolean", required: false, groupName: "Additional Provisions", displayOrder: 42, helpText: "If yes, the Certificate will include a standard indemnification clause protecting directors and officers." },
+
+      // Logic variables (hidden)
+      { name: "entity_label", displayLabel: "Entity Label", type: "computed", isComputed: true, displayOrder: 100,
+        validation: { logicType: "formula", formula: '{{company_name}}, a {{state}} corporation' }, expression: '{{company_name}}, a {{state}} corporation' },
+      { name: "total_founder_shares", displayLabel: "Total Founder Shares", type: "computed", isComputed: true, displayOrder: 101,
+        validation: { logicType: "formula", formula: 'sum(founders.$.shares)' }, expression: 'sum(founders.$.shares)' },
+      { name: "founder_count_text", displayLabel: "Founder Count Text", type: "computed", isComputed: true, displayOrder: 102,
+        validation: { logicType: "formula", formula: 'count(founders)' }, expression: 'count(founders)' },
+    ];
+
+    for (const v of variables) {
+      await prisma.variable.create({
+        data: {
+          workflowId: workflow.id,
+          name: v.name,
+          displayLabel: v.displayLabel,
+          type: v.type,
+          required: v.required || false,
+          defaultValue: v.defaultValue || null,
+          validation: v.validation || null,
+          helpText: v.helpText || null,
+          condition: v.condition || null,
+          groupName: v.groupName || null,
+          displayOrder: v.displayOrder,
+          isComputed: v.isComputed || false,
+          expression: v.expression || null,
+        },
+      });
+    }
+
+    // Generate and upload the sample template
+    const JSZip = (await import("jszip")).default;
+    const zip = new JSZip();
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const b = "<w:rPr><w:b/></w:rPr>";
+    const bLg = '<w:rPr><w:b/><w:sz w:val="36"/></w:rPr>';
+    const bMd = '<w:rPr><w:b/><w:sz w:val="28"/></w:rPr>';
+    const ctr = '<w:pPr><w:jc w:val="center"/></w:pPr>';
+    const p = (text: string, bold?: boolean, center?: boolean) =>
+      `<w:p>${center ? ctr : ""}<w:r>${bold ? b : ""}<w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+    const body = [
+      `<w:p>${ctr}<w:r>${bLg}<w:t>CERTIFICATE OF INCORPORATION</w:t></w:r></w:p>`,
+      `<w:p>${ctr}<w:r><w:t>of</w:t></w:r></w:p>`,
+      `<w:p>${ctr}<w:r>${bMd}<w:t>{{company_name}}</w:t></w:r></w:p>`,
+      "<w:p/>",
+      p("ARTICLE I - NAME", true),
+      p('The name of the corporation is {{company_name}} (the "Corporation").'),
+      "<w:p/>",
+      p("ARTICLE II - REGISTERED AGENT", true),
+      p("The address of the registered office of the Corporation in the State of {{state}} is {{registered_agent_address}}. The name of the registered agent at such address is {{registered_agent_name}}."),
+      "<w:p/>",
+      p("ARTICLE III - PURPOSE", true),
+      p("The purpose of the Corporation is to engage in {{business_purpose}}."),
+      "<w:p/>",
+      p("ARTICLE IV - AUTHORIZED STOCK", true),
+      p("The total number of shares of stock which the Corporation shall have authority to issue is {{authorized_shares}} shares of Common Stock, each having a par value of ${{par_value}} per share."),
+      "<w:p/>",
+      p("ARTICLE V - INCORPORATOR", true),
+      p("The name and mailing address of the incorporator is {{incorporator_name}}, {{incorporator_address}}."),
+      "<w:p/>",
+      p("{{#if has_indemnification}}"),
+      p("ARTICLE VI - INDEMNIFICATION", true),
+      p("The Corporation shall indemnify any person who was or is a party to any proceeding by reason of the fact that such person is or was a director or officer of the Corporation, to the fullest extent permitted by the General Corporation Law of the State of Delaware."),
+      p("{{/if}}"),
+      "<w:p/>",
+      p("INITIAL STOCKHOLDERS", true),
+      p("{{#each founders}}"),
+      p("{{@index}}. {{this.name}} ({{this.title}}) - {{this.shares}} shares - {{this.email}}"),
+      p("{{/each}}"),
+      "<w:p/>",
+      p("IN WITNESS WHEREOF, the undersigned incorporator has executed this Certificate of Incorporation on {{formation_date}}."),
+      "<w:p/>", "<w:p/>",
+      p("_____________________________"),
+      p("{{incorporator_name}}, Incorporator"),
+    ].join("");
+
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body}</w:body></w:document>`;
+    const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+    const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
+    const wordRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+
+    zip.file("[Content_Types].xml", contentTypes);
+    zip.file("_rels/.rels", rels);
+    zip.file("word/_rels/document.xml.rels", wordRels);
+    zip.file("word/document.xml", documentXml);
+
+    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+    // Upload template to storage
+    const storagePath = `templates/${orgId}/${workflow.id}/cert_of_incorporation.docx`;
+    const { parseTemplate } = await import("../engines/word");
+    const schema = await parseTemplate(buffer);
+
+    await supabase.storage.from("draft-documents").upload(storagePath, buffer, {
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      upsert: true,
+    });
+
+    // Create template record
+    const template = await prisma.template.create({
+      data: {
+        orgId,
+        name: "Certificate of Incorporation",
+        description: "Delaware C-Corporation formation document with conditional indemnification and founder listing",
+        format: "docx",
+        filePath: storagePath,
+        parsedSchema: schema as any,
+      },
+    });
+
+    await prisma.templateVersion.create({
+      data: {
+        templateId: template.id,
+        versionNumber: 1,
+        filePath: storagePath,
+        fileHash: "",
+        parsedSchema: schema as any,
+        changeNote: "Auto-generated demo template",
+        createdBy: req.auth!.userId,
+      },
+    });
+
+    // Link template to workflow
+    await prisma.workflowTemplate.create({
+      data: {
+        workflowId: workflow.id,
+        templateId: template.id,
+        displayOrder: 1,
+      },
+    });
+
+    res.status(201).json({
+      workflow,
+      message: "Demo workflow created with 5 pages, 16 questions, 3 logic variables, 1 template (Certificate of Incorporation). Go to the workflow builder to explore, or create a matter to test generation.",
+    });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
