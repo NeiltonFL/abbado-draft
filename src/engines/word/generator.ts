@@ -489,25 +489,8 @@ export async function generateDocument(
   // Write back document.xml
   zip.file("word/document.xml", documentXml);
 
-  // 7. Embed metadata (live mode only)
-  if (options.mode === "live") {
-    // Add Custom XML Part with Abbado Draft metadata
-    const metadataXml = buildMetadataXml(options, variableSnapshot, structuralTagRegistry);
-    zip.file("customXml/item_abbado_draft.xml", metadataXml);
-
-    // Add the Content Types entry for our custom XML
-    const contentTypesFile = zip.file("[Content_Types].xml");
-    if (contentTypesFile) {
-      let contentTypes = await contentTypesFile.async("string");
-      if (!contentTypes.includes("item_abbado_draft.xml")) {
-        contentTypes = contentTypes.replace(
-          "</Types>",
-          `<Override PartName="/customXml/item_abbado_draft.xml" ContentType="application/xml"/></Types>`
-        );
-        zip.file("[Content_Types].xml", contentTypes);
-      }
-    }
-  }
+  // Metadata embedding disabled until Word Add-In is built
+  // Custom XML parts require proper OPC relationships to avoid corrupting the .docx
 
   // 8. Generate the output buffer
   const buffer = await zip.generateAsync({
