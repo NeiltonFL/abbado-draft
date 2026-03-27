@@ -48,6 +48,9 @@ export async function generateAllDocuments(
 
   const interviewValues = (matter.variableValues as Record<string, any>) || {};
 
+  // ── Preprocess interview values ──
+  const processed = preprocessValues(interviewValues, matter.workflow.variables);
+
   // ── Evaluate Logic tab hidden variables ──
   const computedValues = evaluateLogicVariables(
     matter.workflow.variables.map((v: any) => ({
@@ -57,11 +60,11 @@ export async function generateAllDocuments(
       validation: v.validation,
       expression: v.expression,
     })),
-    interviewValues
+    processed
   );
 
   // Merge: interview values + computed logic values
-  const values = { ...interviewValues, ...computedValues };
+  const values = { ...processed, ...computedValues };
 
   const results: GenerateAllResult = { documents: [], skipped: [], errors: [] };
 
@@ -359,4 +362,121 @@ async function fetchTemplateFile(filePath: string | null): Promise<Buffer | null
   } catch {
     return null;
   }
+}
+
+// ── Preprocess interview values for the engine ──
+
+function preprocessValues(
+  raw: Record<string, any>,
+  variables: any[]
+): Record<string, any> {
+  const result: Record<string, any> = {};
+
+  // Build a type map from workflow variables
+  const typeMap: Record<string, string> = {};
+  for (const v of variables) {
+    typeMap[v.name] = v.type;
+  }
+
+  // First pass: copy all values and normalize types
+  for (const [key, value] of Object.entries(raw)) {
+    // Skip sub-question flat keys (Parent.$.field) — they'll be assembled below
+    if (key.includes(".$.")) continue;
+
+    if (typeMap[key] === "address" && typeof value === "object" && value !== null) {
+      // Address: store both the object (for dot notation) and a formatted string
+      result[key] = formatAddress(value);
+      // Also store sub-fields for dot notation access: {{address.street}} etc.
+      for (const [field, fieldVal] of Object.entries(value)) {
+        result[`${key}.${field}`] = fieldVal;
+      }
+    } else if (typeMap[key] === "phone" && typeof value === "object" && value !== null) {
+      // Phone: use formatted string
+      result[key] = value.formatted || value.number || String(value);
+      result[`${key}.number`] = value.number;
+      result[`${key}.dialCode`] = value.dialCode;
+      result[`${key}.countryCode`] = value.countryCode;
+    } else if (typeMap[key] === "boolean" || typeof value === "boolean") {
+      // Normalize booleans to string "true"/"false" for condition evaluation
+      result[key] = value === true || value === "true" || value === "Yes" || value === "yes" ? "true" : "false";
+    } else if (typeMap[key] === "date" && value) {
+      // Format dates nicely
+      try {
+        const d = new Date(value);
+        if (!isNaN(d.getTime())) {
+          result[key] = d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+          result[`${key}_raw`] = value; // Keep ISO format too
+        } else {
+          result[key] = value;
+        }
+      } catch {
+        result[key] = value;
+      }
+    } else {
+      result[key] = value;
+    }
+  }
+
+  // Second pass: assemble repeating items from flat interview data
+  // The interview stores repeating data as: { "founders_0_name": "John", "founders_0_shares": "1000", "founders_1_name": "Jane" }
+  // Or possibly as: { "founders": [{name: "John", shares: 1000}] } if the interview sends it as an array
+  for (const v of variables) {
+    if (v.type !== "repeating") continue;
+
+    const name = v.name;
+
+    // Check if it's already an array (some interview implementations send arrays directly)
+    if (Array.isArray(raw[name])) {
+      result[name] = raw[name];
+      continue;
+    }
+
+    // Try to assemble from indexed flat keys: founders_0_name, founders_1_name, etc.
+    const items: Record<string, any>[] = [];
+    const indexPattern = new RegExp(`^${name}_(\\d+)_(.+)$`);
+
+    for (const [key, value] of Object.entries(raw)) {
+      const match = key.match(indexPattern);
+      if (match) {
+        const idx = parseInt(match[1]);
+        const field = match[2];
+        while (items.length <= idx) items.push({});
+        items[idx][field] = value;
+      }
+    }
+
+    // Also try dot notation: founders.0.name
+    const dotPattern = new RegExp(`^${name}\\.(\\d+)\\.(.+)$`);
+    for (const [key, value] of Object.entries(raw)) {
+      const match = key.match(dotPattern);
+      if (match) {
+        const idx = parseInt(match[1]);
+        const field = match[2];
+        while (items.length <= idx) items.push({});
+        items[idx][field] = value;
+      }
+    }
+
+    if (items.length > 0) {
+      result[name] = items;
+    } else if (!result[name]) {
+      result[name] = []; // Empty array for {{#each}} to handle
+    }
+  }
+
+  return result;
+}
+
+function formatAddress(addr: any): string {
+  if (!addr || typeof addr !== "object") return String(addr || "");
+  const parts: string[] = [];
+  if (addr.street) parts.push(addr.street);
+  if (addr.street2) parts.push(addr.street2);
+  const cityStateZip: string[] = [];
+  if (addr.city) cityStateZip.push(addr.city);
+  if (addr.state) cityStateZip.push(addr.state);
+  if (cityStateZip.length > 0) parts.push(cityStateZip.join(", "));
+  if (addr.zip) parts.push(addr.zip);
+  if (addr.country && addr.country !== "US") parts.push(addr.country);
+  return parts.join(", ") || addr.formatted || "";
 }
