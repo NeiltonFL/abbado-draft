@@ -543,3 +543,32 @@ matterRoutes.delete("/:id", requireRole("user"), async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+// ── Delete matter ──
+matterRoutes.delete("/:id", requireRole("user"), async (req, res) => {
+  try {
+    const { orgId } = getScope(req);
+
+    const matter = await prisma.matter.findFirst({
+      where: { id: req.params.id, orgId },
+    });
+
+    if (!matter) return res.status(404).json({ error: "Matter not found" });
+
+    // Cascade delete: journal entries, conflicts, generated docs, variable history, activity
+    await prisma.$transaction([
+      prisma.editJournalEntry.deleteMany({ where: { generatedDocument: { matterId: matter.id } } }),
+      prisma.generationConflict.deleteMany({ where: { generatedDocument: { matterId: matter.id } } }),
+      prisma.generatedDocument.deleteMany({ where: { matterId: matter.id } }),
+      prisma.variableHistory.deleteMany({ where: { matterId: matter.id } }),
+      prisma.activityEntry.deleteMany({ where: { matterId: matter.id } }),
+      prisma.matter.delete({ where: { id: matter.id } }),
+    ]);
+
+    await auditLog(orgId, req.auth!.userId, "matter.deleted", "matter", matter.id, { name: matter.name });
+
+    res.json({ deleted: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
