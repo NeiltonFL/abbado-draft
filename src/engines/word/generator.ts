@@ -221,8 +221,8 @@ function processRepeatingBlocks(xml: string, values: Record<string, any>): strin
               }
             );
 
-            // Replace {{@index}} with the current index
-            itemContent = itemContent.replace(/\{\{@index\}\}/g, String(index));
+            // Replace {{@index}} with the current index (1-based for documents)
+            itemContent = itemContent.replace(/\{\{@index\}\}/g, String(index + 1));
 
             // Process conditionals within the repeating block using item context
             itemContent = processConditionals(itemContent, values, item);
@@ -266,16 +266,8 @@ function replaceVariables(
       const value = resolveValue(varName, values);
       const displayValue = value !== undefined && value !== null ? String(value) : "";
 
-      if (mode === "final") {
-        // Plain text replacement
-        return escapeXml(displayValue);
-      }
-
-      // Live mode: wrap in SDT with variable tag
-      const sdtId = generateSdtId();
-      tagRegistry[`var_${varName}_${sdtId}`] = varName;
-
-      return buildSdtXml(varName, varName, displayValue, sdtId);
+      // Always plain text for now — SDT wrapping re-enabled with Word Add-In
+      return escapeXml(displayValue);
     }
   );
 }
@@ -359,6 +351,25 @@ function applyStructuralTags(
   return xml;
 }
 
+// ── Cleanup ──
+
+/**
+ * Remove empty runs (<w:r><w:t/></w:r>) and empty paragraphs (<w:p/> or <w:p></w:p>)
+ * left behind after conditional/repeating marker processing.
+ */
+function cleanupEmptyElements(xml: string): string {
+  // Remove runs with empty text
+  xml = xml.replace(/<w:r><w:t[^>]*\/><\/w:r>/g, "");
+  xml = xml.replace(/<w:r><w:t[^>]*><\/w:t><\/w:r>/g, "");
+  // Remove runs with only whitespace text (but keep <w:p/> for intentional blank lines)
+  xml = xml.replace(/<w:r><w:rPr\/><w:t[^>]*><\/w:t><\/w:r>/g, "");
+  // Remove empty paragraphs (but NOT self-closing <w:p/> which are intentional blank lines)
+  xml = xml.replace(/<w:p><\/w:p>/g, "<w:p/>");
+  // Remove paragraphs that have only empty runs
+  xml = xml.replace(/<w:p>(\s*)<\/w:p>/g, "<w:p/>");
+  return xml;
+}
+
 // ── Custom XML Parts ──
 
 /**
@@ -410,7 +421,8 @@ function generateSdtId(): string {
 }
 
 function buildSdtXml(tag: string, alias: string, value: string, sdtId: string): string {
-  return `</w:t></w:r></w:p><w:sdt><w:sdtPr><w:id w:val="${sdtId}"/><w:tag w:val="${escapeXml(tag)}"/><w:alias w:val="${escapeXml(alias)}"/><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t xml:space="preserve">${escapeXml(value)}</w:t></w:r></w:sdtContent></w:sdt><w:p><w:r><w:t xml:space="preserve">`;
+  // Inline SDT — replaces just the run, not the paragraph
+  return `</w:t></w:r><w:sdt><w:sdtPr><w:id w:val="${sdtId}"/><w:tag w:val="${escapeXml(tag)}"/><w:alias w:val="${escapeXml(alias)}"/><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent><w:r><w:t xml:space="preserve">${escapeXml(value)}</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t xml:space="preserve">`;
 }
 
 // ── Main Generator ──
@@ -466,10 +478,13 @@ export async function generateDocument(
   // 5. Update existing SDT values
   documentXml = updateExistingSdts(documentXml, values);
 
-  // 6. Structural tagging (live mode only)
-  if (options.mode === "live") {
-    documentXml = applyStructuralTags(documentXml, structuralTagRegistry);
-  }
+  // 6. Cleanup: remove empty runs and paragraphs left by marker processing
+  documentXml = cleanupEmptyElements(documentXml);
+
+  // 7. Structural tagging (disabled until Word Add-In is built)
+  // if (options.mode === "live") {
+  //   documentXml = applyStructuralTags(documentXml, structuralTagRegistry);
+  // }
 
   // Write back document.xml
   zip.file("word/document.xml", documentXml);
