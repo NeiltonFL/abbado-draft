@@ -111,49 +111,116 @@ export async function generateAllDocuments(
           continue;
         }
 
-        // Run the Word generation engine
-        const options: GenerationOptions = {
-          matterId: matter.id,
-          workflowId: matter.workflowId,
-          templateId: template.id,
-          mode,
-        };
+        // ── Per-item repeating: generate one document per collection item ──
+        const repeatOver = mapping?.repeatOver as string | undefined;
+        const items = repeatOver ? (values[repeatOver] as any[]) : null;
 
-        const genResult = await generateDocument(templateBuffer, values, options);
+        if (repeatOver && Array.isArray(items) && items.length > 0) {
+          // Generate one document per item
+          for (let idx = 0; idx < items.length; idx++) {
+            const item = items[idx];
+            // Merge: promote all item fields to top-level as "this.field"
+            // and also as direct field names for backward compatibility
+            const itemValues: Record<string, any> = {
+              ...values,
+              _currentItem: item,
+              _currentIndex: idx,
+            };
+            // Promote item fields to top-level
+            for (const [k, v] of Object.entries(item)) {
+              itemValues[`this.${k}`] = v;
+              // Also set as direct fields for templates that use {{founder_name}} etc.
+              itemValues[k] = v;
+            }
 
-        // Store generated document in Supabase Storage
-        const storagePath = `generated/${matter.id}/${template.id}/${mode}_${Date.now()}.docx`;
-        const { error: uploadError } = await supabase.storage
-          .from("draft-documents")
-          .upload(storagePath, genResult.buffer, {
-            contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            upsert: true,
+            const options: GenerationOptions = {
+              matterId: matter.id,
+              workflowId: matter.workflowId,
+              templateId: template.id,
+              mode,
+            };
+
+            const genResult = await generateDocument(templateBuffer, itemValues, options);
+
+            // Name: "RSPA - John Smith" using the first text field of the item
+            const itemLabel = item.name || item.founder_name || item.title || `Item ${idx + 1}`;
+            const storagePath = `generated/${matter.id}/${template.id}/${mode}_${idx}_${Date.now()}.docx`;
+            const { error: uploadError } = await supabase.storage
+              .from("draft-documents")
+              .upload(storagePath, genResult.buffer, {
+                contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                upsert: true,
+              });
+
+            if (uploadError) {
+              throw new Error(`Storage upload failed: ${uploadError.message}`);
+            }
+
+            const genDoc = await prisma.generatedDocument.create({
+              data: {
+                matterId: matter.id,
+                templateId: template.id,
+                filePath: storagePath,
+                variableSnapshot: { ...genResult.variableSnapshot, _displayName: `${template.name} - ${itemLabel}` },
+                structuralTagRegistry: genResult.structuralTagRegistry,
+                generationHash: genResult.generationHash,
+                mode,
+              },
+            });
+
+            results.documents.push({
+              id: genDoc.id,
+              templateName: `${template.name} - ${itemLabel}`,
+              templateFormat: template.format,
+              filePath: storagePath,
+              mode,
+            });
+          }
+        } else {
+          // Single document generation (existing behavior)
+          const options: GenerationOptions = {
+            matterId: matter.id,
+            workflowId: matter.workflowId,
+            templateId: template.id,
+            mode,
+          };
+
+          const genResult = await generateDocument(templateBuffer, values, options);
+
+          // Store generated document in Supabase Storage
+          const storagePath = `generated/${matter.id}/${template.id}/${mode}_${Date.now()}.docx`;
+          const { error: uploadError } = await supabase.storage
+            .from("draft-documents")
+            .upload(storagePath, genResult.buffer, {
+              contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              upsert: true,
+            });
+
+          if (uploadError) {
+            throw new Error(`Storage upload failed: ${uploadError.message}`);
+          }
+
+          // Create database record
+          const genDoc = await prisma.generatedDocument.create({
+            data: {
+              matterId: matter.id,
+              templateId: template.id,
+              filePath: storagePath,
+              variableSnapshot: genResult.variableSnapshot,
+              structuralTagRegistry: genResult.structuralTagRegistry,
+              generationHash: genResult.generationHash,
+              mode,
+            },
           });
 
-        if (uploadError) {
-          throw new Error(`Storage upload failed: ${uploadError.message}`);
-        }
-
-        // Create database record
-        const genDoc = await prisma.generatedDocument.create({
-          data: {
-            matterId: matter.id,
-            templateId: template.id,
+          results.documents.push({
+            id: genDoc.id,
+            templateName: template.name,
+            templateFormat: template.format,
             filePath: storagePath,
-            variableSnapshot: genResult.variableSnapshot,
-            structuralTagRegistry: genResult.structuralTagRegistry,
-            generationHash: genResult.generationHash,
             mode,
-          },
-        });
-
-        results.documents.push({
-          id: genDoc.id,
-          templateName: template.name,
-          templateFormat: template.format,
-          filePath: storagePath,
-          mode,
-        });
+          });
+        }
       } else {
         // PDF and Excel engines — placeholder for now
         const genDoc = await prisma.generatedDocument.create({
@@ -465,6 +532,72 @@ function preprocessValues(
     } else if (!result[name]) {
       result[name] = []; // Empty array for {{#each}} to handle
     }
+  }
+
+  // ── Third pass: Compute derived values for templates ──
+
+  // Enrich each founder in the founders array with computed fields
+  if (Array.isArray(result.founders)) {
+    for (const founder of result.founders) {
+      const shares = Number(founder.founder_shares) || 0;
+      const timeline = Number(founder.founder_vesting_timeline) || 0;
+      const cliff = Number(founder.founder_vesting_cliff) || 0;
+
+      founder.founder_purchase_price = shares * 0.00001;
+      founder.founder_half_purchase_price = shares * 0.000005;
+      founder.founder_vesting_years = timeline > 0 ? Math.floor(timeline / 12) : 0;
+      founder.founder_vesting_cliff_years = cliff > 0 ? Math.floor(cliff / 12) : 0;
+      founder.founder_vesting_half_years = timeline > 0 ? Math.floor(timeline / 6) : 0;
+      founder.founder_vesting_quarters = timeline > 0 ? Math.floor(timeline / 3) : 0;
+      founder.founder_cliff_percent = timeline > 0 ? Math.round((cliff / timeline) * 100) : 0;
+      founder.founder_vesting_timeline_divisible_by_12 = timeline > 0 && timeline % 12 === 0 ? "true" : "false";
+      founder.founder_vesting_cliff_divisible_by_12 = cliff > 0 && cliff % 12 === 0 ? "true" : "false";
+
+      // Normalize booleans inside founder objects
+      for (const key of ["board_yn", "founder_addroles_yn", "founder_vesting_schedule_yn", "founder_vesting_cliff_yn"]) {
+        if (key in founder) {
+          const v = founder[key];
+          founder[key] = (v === true || v === "true" || v === "Yes" || v === "yes") ? "true" : "false";
+        }
+      }
+    }
+  }
+
+  // Build all_directors list from founders + non-founder directors
+  const directorNames: string[] = [];
+  if (Array.isArray(result.founders)) {
+    for (const f of result.founders) {
+      if (f.board_yn === "true" || f.board_yn === true) {
+        directorNames.push(f.founder_name || f.name || "");
+      }
+    }
+  }
+  if (Array.isArray(result.non_founder_directors)) {
+    for (const d of result.non_founder_directors) {
+      directorNames.push(d.nonfounderdirector_name || d.name || "");
+    }
+  }
+  result.all_directors = directorNames;
+  result.all_directors_count = directorNames.length;
+
+  // Build natural language director text with Oxford comma + is/are
+  if (directorNames.length === 0) {
+    result.all_directors_text = "";
+  } else if (directorNames.length === 1) {
+    result.all_directors_text = `${directorNames[0]} is`;
+  } else if (directorNames.length === 2) {
+    result.all_directors_text = `${directorNames[0]} and ${directorNames[1]} are`;
+  } else {
+    const last = directorNames[directorNames.length - 1];
+    const rest = directorNames.slice(0, -1).join(", ");
+    result.all_directors_text = `${rest}, and ${last} are`;
+  }
+
+  // Compute total shares to issue
+  if (Array.isArray(result.founders)) {
+    result.shares_to_issue = result.founders.reduce(
+      (sum: number, f: any) => sum + (Number(f.founder_shares) || 0), 0
+    );
   }
 
   return result;

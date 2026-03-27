@@ -24,12 +24,12 @@ export interface GenerationResult {
  * Evaluate a condition expression against variable values.
  * Supports: ==, !=, >, <, >=, <=, truthy checks
  */
-function evaluateCondition(expression: string, values: Record<string, any>): boolean {
+function evaluateCondition(expression: string, values: Record<string, any>, currentItem?: any): boolean {
   const compMatch = expression.match(/^(\S+)\s*(==|!=|>=|<=|>|<)\s*["']?([^"']*)["']?$/);
 
   if (compMatch) {
     const [, varName, operator, compareValue] = compMatch;
-    const actualValue = resolveValue(varName, values);
+    const actualValue = resolveValue(varName, values, currentItem);
 
     switch (operator) {
       case "==": return String(actualValue) === compareValue;
@@ -43,7 +43,7 @@ function evaluateCondition(expression: string, values: Record<string, any>): boo
   }
 
   // Truthy check
-  const val = resolveValue(expression.trim(), values);
+  const val = resolveValue(expression.trim(), values, currentItem);
   return Boolean(val) && val !== "false" && val !== "0" && val !== "";
 }
 
@@ -162,7 +162,7 @@ function processConditionals(xml: string, values: Record<string, any>, currentIt
       const trueContent = elseMatch[2];
       const falseContent = elseMatch[3];
 
-      const isTrue = evaluateCondition(condition, values);
+      const isTrue = evaluateCondition(condition, values, currentItem);
       result = result.replace(elseMatch[0], isTrue ? trueContent : falseContent);
       changed = true;
       continue;
@@ -174,7 +174,7 @@ function processConditionals(xml: string, values: Record<string, any>, currentIt
       const condition = ifMatch[1];
       const content = ifMatch[2];
 
-      const isTrue = evaluateCondition(condition, values);
+      const isTrue = evaluateCondition(condition, values, currentItem);
       result = result.replace(ifMatch[0], isTrue ? content : "");
       changed = true;
     }
@@ -209,26 +209,7 @@ function processRepeatingBlocks(xml: string, values: Record<string, any>): strin
 
       if (Array.isArray(items) && items.length > 0) {
         const expanded = items
-          .map((item, index) => {
-            let itemContent = template;
-
-            // Replace {{this.field}} or {{this.field|format}} with actual values
-            itemContent = itemContent.replace(
-              /\{\{this\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\|([a-zA-Z_]+)(?::([^}]*))?)?\}\}/g,
-              (_, field, fmt, fmtArg) => {
-                const val = item[field];
-                return escapeXml(applyFormat(val, fmt, fmtArg));
-              }
-            );
-
-            // Replace {{@index}} with the current index (1-based for documents)
-            itemContent = itemContent.replace(/\{\{@index\}\}/g, String(index + 1));
-
-            // Process conditionals within the repeating block using item context
-            itemContent = processConditionals(itemContent, values, item);
-
-            return itemContent;
-          })
+          .map((item, index) => expandItemReferences(template, item, index, values))
           .join("");
 
         result = result.replace(match[0], expanded);
@@ -244,7 +225,131 @@ function processRepeatingBlocks(xml: string, values: Record<string, any>): strin
   return result;
 }
 
-// ── Variable Replacement with Format Modifiers ──
+// ── Item Reference Expansion Helper ──
+
+/**
+ * Replace {{this.field}}, {{this.field|format}}, and {{@index}} within
+ * a content string, using the given item and index. Also processes
+ * conditionals that reference this.field.
+ */
+function expandItemReferences(
+  content: string,
+  item: any,
+  index: number,
+  values: Record<string, any>
+): string {
+  let result = content;
+
+  // Replace {{this.field}} or {{this.field|format}} or {{this.field|fmt:arg}}
+  // Also support chained: {{this.field|fmt1|fmt2}}
+  result = result.replace(
+    /\{\{this\.([a-zA-Z_][a-zA-Z0-9_]*)(\|[^}]+)?\}\}/g,
+    (_, field, modifiers) => {
+      let val = item[field];
+      if (modifiers) {
+        // Parse chained modifiers: |fmt1|fmt2:arg|fmt3
+        const mods = modifiers.slice(1).split("|");
+        for (const mod of mods) {
+          const [fmt, fmtArg] = mod.split(":");
+          val = applyFormat(val, fmt, fmtArg);
+        }
+        return escapeXml(String(val ?? ""));
+      }
+      return escapeXml(String(val ?? ""));
+    }
+  );
+
+  // Replace {{@index}} with 1-based index
+  result = result.replace(/\{\{@index\}\}/g, String(index + 1));
+
+  // Process conditionals within the block using item context
+  result = processConditionals(result, values, item);
+
+  return result;
+}
+
+// ── Table Row Repeating ──
+
+/**
+ * Process {{#each-row collection}}...{{/each-row}} blocks within tables.
+ * These markers indicate that entire TABLE ROWS (<w:tr>) should be duplicated
+ * for each item in the collection.
+ *
+ * Pattern in the .docx XML:
+ *   <w:tr>...<w:t>{{#each-row founders}}</w:t>...</w:tr>   ← marker row (removed)
+ *   <w:tr>...<w:t>{{this.name}}</w:t>...</w:tr>             ← data row(s) (duplicated)
+ *   <w:tr>...<w:t>{{/each-row}}</w:t>...</w:tr>             ← end marker row (removed)
+ *
+ * Supports conditional rows within the block:
+ *   {{#each-row founders if this.board_yn == true}} — filters items
+ */
+function processTableRowRepeating(xml: string, values: Record<string, any>): string {
+  let result = xml;
+  let changed = true;
+  let iterations = 0;
+
+  while (changed && iterations < 50) {
+    changed = false;
+    iterations++;
+
+    // Find a {{#each-row COLLECTION}} marker
+    const markerMatch = result.match(/\{\{#each-row\s+(\S+?)(?:\s+if\s+(.+?))?\}\}/);
+    if (!markerMatch) break;
+
+    const collection = markerMatch[1];
+    const filterExpr = markerMatch[2]; // Optional: "this.board_yn == true"
+    const markerText = markerMatch[0];
+    const markerPos = result.indexOf(markerText);
+
+    // Find the <w:tr> that contains this marker
+    const startRowStart = result.lastIndexOf("<w:tr", markerPos);
+    const startRowEnd = result.indexOf("</w:tr>", markerPos) + "</w:tr>".length;
+    if (startRowStart === -1 || startRowEnd === -1) break;
+
+    // Find the matching {{/each-row}} and its containing <w:tr>
+    const endMarkerPos = result.indexOf("{{/each-row}}", startRowEnd);
+    if (endMarkerPos === -1) break;
+
+    const endRowStart = result.lastIndexOf("<w:tr", endMarkerPos);
+    const endRowEnd = result.indexOf("</w:tr>", endMarkerPos) + "</w:tr>".length;
+    if (endRowStart === -1 || endRowEnd === -1) break;
+
+    // Extract the data rows between start marker row and end marker row
+    const dataRows = result.slice(startRowEnd, endRowStart);
+
+    // Get the collection items
+    let items = values[collection];
+    if (!Array.isArray(items)) items = [];
+
+    // Apply filter if specified
+    if (filterExpr && items.length > 0) {
+      items = items.filter((item: any) => {
+        // Create a temporary values context with this.* mapped
+        const tempValues: Record<string, any> = { ...values };
+        for (const [k, v] of Object.entries(item)) {
+          tempValues[`this.${k}`] = v;
+        }
+        return evaluateCondition(filterExpr, tempValues, item);
+      });
+    }
+
+    // Expand data rows for each item
+    let expanded = "";
+    if (items.length > 0) {
+      for (let i = 0; i < items.length; i++) {
+        expanded += expandItemReferences(dataRows, items[i], i, values);
+      }
+    }
+    // If no items, expanded is empty — rows are simply removed
+
+    // Replace the entire block (start marker row + data rows + end marker row)
+    const fullBlock = result.slice(startRowStart, endRowEnd);
+    result = result.replace(fullBlock, expanded);
+    changed = true;
+  }
+
+  return result;
+}
 
 /**
  * Replace {{variable_name}} or {{variable_name|format}} or {{variable_name|format:arg}}.
@@ -262,12 +367,24 @@ function replaceVariables(
   mode: "live" | "final",
   tagRegistry: Record<string, string>
 ): string {
+  // Match {{varName}}, {{varName|fmt}}, {{varName|fmt:arg}}, {{varName|fmt1|fmt2:arg}}
   return xml.replace(
-    /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)(?:\|([a-zA-Z_]+)(?::([^}]*))?)?\}\}/g,
-    (fullMatch, varName, format, formatArg) => {
+    /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)(\|[^}]+)?\}\}/g,
+    (fullMatch, varName, modifiers) => {
       if (varName.startsWith("#") || varName.startsWith("/") || varName.startsWith("@")) return fullMatch;
-      const value = resolveValue(varName, values);
-      return escapeXml(applyFormat(value, format, formatArg));
+      let value: any = resolveValue(varName, values);
+      if (modifiers) {
+        // Parse chained modifiers: |fmt1|fmt2:arg|fmt3
+        const mods = modifiers.slice(1).split("|");
+        for (const mod of mods) {
+          const colonIdx = mod.indexOf(":");
+          const fmt = colonIdx >= 0 ? mod.slice(0, colonIdx) : mod;
+          const fmtArg = colonIdx >= 0 ? mod.slice(colonIdx + 1) : undefined;
+          value = applyFormat(value, fmt, fmtArg);
+        }
+        return escapeXml(String(value ?? ""));
+      }
+      return escapeXml(applyFormat(value, undefined, undefined));
     }
   );
 }
@@ -561,10 +678,14 @@ export async function generateDocument(
   // 1. Reassemble split text runs
   documentXml = reassembleSplitRuns(documentXml);
 
-  // 2. Process conditionals
+  // 2. Process table-row repeating ({{#each-row}}...{{/each-row}}) — must run before
+  //    paragraph-level repeating so that table rows are expanded first
+  documentXml = processTableRowRepeating(documentXml, values);
+
+  // 3. Process conditionals
   documentXml = processConditionals(documentXml, values);
 
-  // 3. Process repeating sections
+  // 4. Process paragraph-level repeating sections
   documentXml = processRepeatingBlocks(documentXml, values);
 
   // 4. Replace mustache variables

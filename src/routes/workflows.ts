@@ -352,24 +352,29 @@ workflowRoutes.post("/:id/duplicate", requireRole("editor"), async (req, res) =>
 workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
   try {
     const { orgId } = getScope(req);
+    const fs = await import("fs");
+    const path = await import("path");
 
     // Create workflow
     const workflow = await prisma.workflow.create({
       data: {
         orgId,
-        name: "Delaware Corporation Formation",
-        description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation with conditional indemnification and repeating founder blocks.",
+        name: "Delaware Incorporation",
+        description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation, Action of Incorporator, Initial Bylaws, Organizational Board Consent, SS-4 Authorization, and per-founder RSPA, EIACA, and 83(b) Election documents.",
         category: "Corporate Formation",
       },
     });
 
-    // Create interview sections (pages)
+    // ── Interview Sections (pages grouped into sidebar sections) ──
     const sections = [
       { name: "Company Information", description: JSON.stringify({ section: "Company Details", text: "Basic information about the corporation being formed." }), displayOrder: 0 },
-      { name: "Registered Agent", description: JSON.stringify({ section: "Company Details", text: "The registered agent receives legal documents on behalf of the corporation." }), displayOrder: 1 },
-      { name: "Stock Structure", description: JSON.stringify({ section: "Equity", text: "Define the authorized shares and par value." }), displayOrder: 2 },
-      { name: "Founders", description: JSON.stringify({ section: "Equity", text: "Add each founder and their share allocation." }), displayOrder: 3 },
-      { name: "Additional Provisions", description: JSON.stringify({ section: "Legal", text: "Optional legal provisions for the certificate." }), displayOrder: 4 },
+      { name: "Company Address", description: JSON.stringify({ section: "Company Details", text: "Principal office address for the corporation." }), displayOrder: 1 },
+      { name: "Registered Agent", description: JSON.stringify({ section: "Company Details", text: "The registered agent receives legal documents on behalf of the corporation in Delaware." }), displayOrder: 2 },
+      { name: "Stock Structure", description: JSON.stringify({ section: "Equity", text: "Define the authorized shares for the corporation." }), displayOrder: 3 },
+      { name: "Founders", description: JSON.stringify({ section: "Equity", text: "Add each founder with their share allocation, vesting, and roles." }), displayOrder: 4 },
+      { name: "Officers", description: JSON.stringify({ section: "Leadership", text: "Designate the CEO, Secretary, and any additional officers or directors." }), displayOrder: 5 },
+      { name: "Incorporator", description: JSON.stringify({ section: "Filing", text: "The person who signs and files the Certificate of Incorporation." }), displayOrder: 6 },
+      { name: "Designee", description: JSON.stringify({ section: "Filing", text: "Third-party designee authorized to apply for the EIN." }), displayOrder: 7 },
     ];
 
     for (const s of sections) {
@@ -378,51 +383,106 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
       });
     }
 
-    // Create variables (questions)
-    const variables = [
-      // Company Information page
-      { name: "company_name", displayLabel: "Legal Name of the Corporation", type: "text", required: true, groupName: "Company Information", displayOrder: 0, helpText: "Must match exactly what will appear on the Certificate of Incorporation." },
-      { name: "state", displayLabel: "State of Incorporation", type: "state", required: true, groupName: "Company Information", displayOrder: 1, defaultValue: "DE" },
-      { name: "business_purpose", displayLabel: "Nature of Business", type: "rich_text", required: true, groupName: "Company Information", displayOrder: 2, helpText: "Describe the business activities. For a broad purpose, use: 'any lawful act or activity for which corporations may be organized under the General Corporation Law of Delaware.'" },
-      { name: "formation_date", displayLabel: "Formation Date", type: "date", required: true, groupName: "Company Information", displayOrder: 3 },
+    // ── Variables (interview questions + computed) ──
+    const variables: any[] = [
+      // ── Page 1: Company Information ──
+      { name: "company_name", displayLabel: "Legal Name of the Corporation", type: "text", required: true, groupName: "Company Information", displayOrder: 0, helpText: "Include entity type (e.g., 'TechNova Inc.'). Must match exactly what will appear on the Certificate of Incorporation." },
+      { name: "incorporation_date", displayLabel: "Incorporation Date", type: "date", required: true, groupName: "Company Information", displayOrder: 1, helpText: "Date the corporation will be formed. Default is typically 5 business days from today." },
+      { name: "business_description", displayLabel: "Nature of Business", type: "text", required: true, groupName: "Company Information", displayOrder: 2, helpText: "Brief description of business activities. Maximum 35 characters. Example: 'AI healthcare data analytics'" },
 
-      // Registered Agent page
-      { name: "registered_agent_name", displayLabel: "Registered Agent Name", type: "text", required: true, groupName: "Registered Agent", displayOrder: 10, helpText: "The person or company that will receive legal documents on behalf of the corporation in the state of incorporation." },
-      { name: "registered_agent_address", displayLabel: "Registered Agent Address", type: "address", required: true, groupName: "Registered Agent", displayOrder: 11 },
+      // ── Page 2: Company Address ──
+      { name: "company_street", displayLabel: "Street Address", type: "text", required: true, groupName: "Company Address", displayOrder: 10 },
+      { name: "company_number", displayLabel: "Suite / Unit", type: "text", required: false, groupName: "Company Address", displayOrder: 11 },
+      { name: "company_city", displayLabel: "City", type: "text", required: true, groupName: "Company Address", displayOrder: 12 },
+      { name: "company_state", displayLabel: "State", type: "state", required: true, groupName: "Company Address", displayOrder: 13 },
+      { name: "company_zip", displayLabel: "ZIP Code", type: "text", required: true, groupName: "Company Address", displayOrder: 14 },
+      { name: "company_county", displayLabel: "County", type: "text", required: true, groupName: "Company Address", displayOrder: 15 },
 
-      // Stock Structure page
-      { name: "authorized_shares", displayLabel: "Total Authorized Shares", type: "number", required: true, groupName: "Stock Structure", displayOrder: 20, defaultValue: "10000000", helpText: "Common number for startups: 10,000,000", validation: { min: 1 } },
-      { name: "par_value", displayLabel: "Par Value per Share ($)", type: "currency", required: true, groupName: "Stock Structure", displayOrder: 21, defaultValue: "0.0001", helpText: "Standard par value for Delaware corporations: $0.0001" },
+      // ── Page 3: Registered Agent ──
+      { name: "agent_selection", displayLabel: "Registered Agent", type: "dropdown", required: true, groupName: "Registered Agent", displayOrder: 20, defaultValue: "SingleFile", validation: { options: ["SingleFile", "Harvard Business Services", "Cogency Global", "Northwest Registered Agent", "Other"] }, helpText: "Select a registered agent. Address auto-populates for all pre-defined options." },
+      { name: "agent_name", displayLabel: "Registered Agent Name", type: "text", required: false, groupName: "Registered Agent", displayOrder: 21, helpText: "Only needed if 'Other' is selected above.", condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "agent_selection", operator: "eq", value: "Other", negate: false }] }] }) },
+      { name: "agent_address", displayLabel: "Registered Agent Address", type: "text", required: false, groupName: "Registered Agent", displayOrder: 22, helpText: "Full address of the registered agent in Delaware. Only needed if 'Other' is selected.", condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "agent_selection", operator: "eq", value: "Other", negate: false }] }] }) },
 
-      // Founders (repeating item + sub-questions)
-      { name: "founders", displayLabel: "Founders", type: "repeating", required: true, groupName: "Founders", displayOrder: 30, validation: { itemLabel: "Founder", minItems: 1, maxItems: 10, subQuestions: [
-        { field: "name", label: "Full Legal Name", type: "text", required: true },
-        { field: "email", label: "Email Address", type: "email", required: true },
-        { field: "title", label: "Title", type: "dropdown", required: false, validation: { options: ["CEO", "CTO", "COO", "CFO", "President", "Secretary", "Director", "Other"] } },
-        { field: "shares", label: "Number of Shares", type: "number", required: true, validation: { min: 1 } },
-        { field: "vesting", label: "Subject to Vesting?", type: "boolean", required: false },
-        { field: "vesting_months", label: "Vesting Period (months)", type: "number", required: false, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "vesting", operator: "eq", value: "true", negate: false }] }] }) },
+      // ── Page 4: Stock Structure ──
+      { name: "share_count", displayLabel: "Total Authorized Shares", type: "number", required: true, groupName: "Stock Structure", displayOrder: 30, defaultValue: "10000000", helpText: "Common for startups: 10,000,000. Typically 9M issued to founders and 1M reserved for ESOP." },
+
+      // ── Page 5: Founders (repeating) ──
+      { name: "founders", displayLabel: "Founders", type: "repeating", required: true, groupName: "Founders", displayOrder: 40, validation: { itemLabel: "Founder", minItems: 1, maxItems: 10, subQuestions: [
+        { field: "founder_name", label: "Full Legal Name", type: "text", required: true },
+        { field: "founder_email", label: "Email Address", type: "email", required: true },
+        { field: "founder_shares", label: "Number of Shares", type: "number", required: true },
+        { field: "board_yn", label: "Board Member?", type: "boolean", required: true },
+        { field: "founder_addroles_yn", label: "Additional Officer Roles?", type: "boolean", required: false },
+        { field: "founder_position", label: "Officer Position", type: "text", required: false },
+        { field: "founder_vesting_schedule_yn", label: "Subject to Vesting?", type: "boolean", required: true },
+        { field: "founder_vesting_schedule", label: "Vesting Schedule", type: "dropdown", required: false, validation: { options: ["Monthly, over 48 months with a 1-year cliff", "Monthly, over 48 months with no cliff", "Other"] } },
+        { field: "founder_vesting_start", label: "Vesting Start Date", type: "date", required: false },
+        { field: "founder_vesting_recurrence", label: "Vesting Recurrence", type: "dropdown", required: false, validation: { options: ["Monthly", "Quarterly", "Semi-annually", "Annually"] } },
+        { field: "founder_vesting_timeline", label: "Total Vesting (months)", type: "number", required: false },
+        { field: "founder_vesting_cliff_yn", label: "Cliff Period?", type: "boolean", required: false },
+        { field: "founder_vesting_cliff", label: "Cliff Duration (months)", type: "number", required: false },
+        { field: "founder_street", label: "Street Address", type: "text", required: true },
+        { field: "founder_number", label: "Suite / Unit", type: "text", required: false },
+        { field: "founder_city", label: "City", type: "text", required: true },
+        { field: "founder_state", label: "State", type: "state", required: true },
+        { field: "founder_zip", label: "ZIP Code", type: "text", required: true },
+        { field: "founder_country", label: "Country", type: "text", required: false },
       ] } },
-      // Sub-questions (flattened)
-      { name: "founders.$.name", displayLabel: "Full Legal Name", type: "text", required: true, groupName: "Founders", displayOrder: 31 },
-      { name: "founders.$.email", displayLabel: "Email Address", type: "email", required: true, groupName: "Founders", displayOrder: 32 },
-      { name: "founders.$.title", displayLabel: "Title", type: "dropdown", required: false, groupName: "Founders", displayOrder: 33, validation: { options: ["CEO", "CTO", "COO", "CFO", "President", "Secretary", "Director", "Other"] } },
-      { name: "founders.$.shares", displayLabel: "Number of Shares", type: "number", required: true, groupName: "Founders", displayOrder: 34, validation: { min: 1 } },
-      { name: "founders.$.vesting", displayLabel: "Subject to Vesting?", type: "boolean", required: false, groupName: "Founders", displayOrder: 35 },
-      { name: "founders.$.vesting_months", displayLabel: "Vesting Period (months)", type: "number", required: false, groupName: "Founders", displayOrder: 36, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "vesting", operator: "eq", value: "true", negate: false }] }] }) },
+      // Flattened sub-question entries (for display in the builder)
+      { name: "founders.$.founder_name", displayLabel: "Full Legal Name", type: "text", required: true, groupName: "Founders", displayOrder: 41 },
+      { name: "founders.$.founder_email", displayLabel: "Email Address", type: "email", required: true, groupName: "Founders", displayOrder: 42 },
+      { name: "founders.$.founder_shares", displayLabel: "Number of Shares", type: "number", required: true, groupName: "Founders", displayOrder: 43 },
+      { name: "founders.$.board_yn", displayLabel: "Board Member?", type: "boolean", required: true, groupName: "Founders", displayOrder: 44 },
+      { name: "founders.$.founder_addroles_yn", displayLabel: "Additional Officer Roles?", type: "boolean", required: false, groupName: "Founders", displayOrder: 45 },
+      { name: "founders.$.founder_position", displayLabel: "Officer Position", type: "text", required: false, groupName: "Founders", displayOrder: 46 },
+      { name: "founders.$.founder_vesting_schedule_yn", displayLabel: "Subject to Vesting?", type: "boolean", required: true, groupName: "Founders", displayOrder: 47 },
+      { name: "founders.$.founder_vesting_schedule", displayLabel: "Vesting Schedule", type: "dropdown", required: false, groupName: "Founders", displayOrder: 48, validation: { options: ["Monthly, over 48 months with a 1-year cliff", "Monthly, over 48 months with no cliff", "Other"] } },
+      { name: "founders.$.founder_vesting_start", displayLabel: "Vesting Start Date", type: "date", required: false, groupName: "Founders", displayOrder: 49 },
+      { name: "founders.$.founder_vesting_recurrence", displayLabel: "Vesting Recurrence", type: "dropdown", required: false, groupName: "Founders", displayOrder: 50, validation: { options: ["Monthly", "Quarterly", "Semi-annually", "Annually"] } },
+      { name: "founders.$.founder_vesting_timeline", displayLabel: "Total Vesting (months)", type: "number", required: false, groupName: "Founders", displayOrder: 51 },
+      { name: "founders.$.founder_vesting_cliff_yn", displayLabel: "Cliff Period?", type: "boolean", required: false, groupName: "Founders", displayOrder: 52 },
+      { name: "founders.$.founder_vesting_cliff", displayLabel: "Cliff Duration (months)", type: "number", required: false, groupName: "Founders", displayOrder: 53 },
+      { name: "founders.$.founder_street", displayLabel: "Street Address", type: "text", required: true, groupName: "Founders", displayOrder: 54 },
+      { name: "founders.$.founder_number", displayLabel: "Suite / Unit", type: "text", required: false, groupName: "Founders", displayOrder: 55 },
+      { name: "founders.$.founder_city", displayLabel: "City", type: "text", required: true, groupName: "Founders", displayOrder: 56 },
+      { name: "founders.$.founder_state", displayLabel: "State", type: "state", required: true, groupName: "Founders", displayOrder: 57 },
+      { name: "founders.$.founder_zip", displayLabel: "ZIP Code", type: "text", required: true, groupName: "Founders", displayOrder: 58 },
+      { name: "founders.$.founder_country", displayLabel: "Country", type: "text", required: false, groupName: "Founders", displayOrder: 59, defaultValue: "United States" },
 
-      // Additional Provisions page
-      { name: "incorporator_name", displayLabel: "Incorporator Name", type: "text", required: true, groupName: "Additional Provisions", displayOrder: 40 },
-      { name: "incorporator_address", displayLabel: "Incorporator Mailing Address", type: "text", required: true, groupName: "Additional Provisions", displayOrder: 41 },
-      { name: "has_indemnification", displayLabel: "Include Indemnification Provision?", type: "boolean", required: false, groupName: "Additional Provisions", displayOrder: 42, helpText: "If yes, the Certificate will include a standard indemnification clause protecting directors and officers." },
+      // ── Page 6: Officers ──
+      { name: "company_ceo_name", displayLabel: "CEO Name", type: "text", required: true, groupName: "Officers", displayOrder: 60, helpText: "Usually a founder." },
+      { name: "company_secretary_name", displayLabel: "Secretary Name", type: "text", required: true, groupName: "Officers", displayOrder: 61, helpText: "Usually a founder. Also signs the SS-4 Authorization." },
+      { name: "company_secretary_phone", displayLabel: "Secretary Phone Number", type: "phone", required: true, groupName: "Officers", displayOrder: 62, helpText: "Required for the EIN application." },
+      { name: "non_founder_officers_yn", displayLabel: "Any Non-Founder Officers?", type: "boolean", required: false, groupName: "Officers", displayOrder: 63 },
+      { name: "non_founder_officers", displayLabel: "Non-Founder Officers", type: "repeating", required: false, groupName: "Officers", displayOrder: 64, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "non_founder_officers_yn", operator: "eq", value: "true", negate: false }] }] }), validation: { itemLabel: "Officer", minItems: 1, maxItems: 5, subQuestions: [
+        { field: "officer_name", label: "Officer Name", type: "text", required: true },
+        { field: "officer_role", label: "Officer Role", type: "text", required: true },
+      ] } },
+      { name: "non_founder_directors_yn", displayLabel: "Any Non-Founder Directors?", type: "boolean", required: false, groupName: "Officers", displayOrder: 65 },
+      { name: "non_founder_directors", displayLabel: "Non-Founder Directors", type: "repeating", required: false, groupName: "Officers", displayOrder: 66, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "non_founder_directors_yn", operator: "eq", value: "true", negate: false }] }] }), validation: { itemLabel: "Director", minItems: 1, maxItems: 5, subQuestions: [
+        { field: "nonfounderdirector_name", label: "Director Name", type: "text", required: true },
+      ] } },
 
-      // Logic variables (hidden)
-      { name: "entity_label", displayLabel: "Entity Label", type: "computed", isComputed: true, displayOrder: 100,
-        validation: { logicType: "formula", formula: '{{company_name}}, a {{state}} corporation' }, expression: '{{company_name}}, a {{state}} corporation' },
-      { name: "total_founder_shares", displayLabel: "Total Founder Shares", type: "computed", isComputed: true, displayOrder: 101,
-        validation: { logicType: "formula", formula: 'sum(founders.$.shares)' }, expression: 'sum(founders.$.shares)' },
-      { name: "founder_count_text", displayLabel: "Founder Count Text", type: "computed", isComputed: true, displayOrder: 102,
-        validation: { logicType: "formula", formula: 'count(founders)' }, expression: 'count(founders)' },
+      // ── Page 7: Incorporator ──
+      { name: "incorporator", displayLabel: "Incorporator Name", type: "text", required: true, groupName: "Incorporator", displayOrder: 70, helpText: "Usually the first founder or the CEO." },
+      { name: "incorporator_street", displayLabel: "Street Address", type: "text", required: true, groupName: "Incorporator", displayOrder: 71 },
+      { name: "incorporator_number", displayLabel: "Suite / Unit", type: "text", required: false, groupName: "Incorporator", displayOrder: 72 },
+      { name: "incorporator_city", displayLabel: "City", type: "text", required: true, groupName: "Incorporator", displayOrder: 73 },
+      { name: "incorporator_state", displayLabel: "State", type: "state", required: true, groupName: "Incorporator", displayOrder: 74 },
+      { name: "incorporator_zip", displayLabel: "ZIP Code", type: "text", required: true, groupName: "Incorporator", displayOrder: 75 },
+      { name: "incorporator_country", displayLabel: "Country", type: "text", required: false, groupName: "Incorporator", displayOrder: 76, defaultValue: "United States" },
+
+      // ── Page 8: Designee ──
+      { name: "has_designee", displayLabel: "Will a Third Party File for the EIN?", type: "boolean", required: false, groupName: "Designee", displayOrder: 80, defaultValue: "true", helpText: "Usually yes — the attorney is the designee." },
+      { name: "designee", displayLabel: "Designee Name", type: "text", required: false, groupName: "Designee", displayOrder: 81, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "has_designee", operator: "eq", value: "true", negate: false }] }] }) },
+      { name: "designee_company", displayLabel: "Designee Company", type: "text", required: false, groupName: "Designee", displayOrder: 82, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "has_designee", operator: "eq", value: "true", negate: false }] }] }) },
+      { name: "designee_address", displayLabel: "Designee Address", type: "text", required: false, groupName: "Designee", displayOrder: 83, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "has_designee", operator: "eq", value: "true", negate: false }] }] }) },
+      { name: "designee_phone", displayLabel: "Designee Phone", type: "text", required: false, groupName: "Designee", displayOrder: 84, condition: JSON.stringify({ groupLogic: "all", groups: [{ logic: "all", negate: false, rules: [{ variable: "has_designee", operator: "eq", value: "true", negate: false }] }] }) },
+
+      // ── Computed / Hidden Variables ──
+      { name: "all_directors_text", displayLabel: "Directors List (natural language)", type: "computed", isComputed: true, displayOrder: 200, validation: { logicType: "formula", formula: "Computed by preprocessValues: builds 'Name1, Name2, and Name3 are' from founders with board_yn=true + non-founder directors" }, expression: "auto" },
+      { name: "all_directors_count", displayLabel: "Director Count", type: "computed", isComputed: true, displayOrder: 201, validation: { logicType: "formula", formula: "count(directors)" }, expression: "auto" },
+      { name: "shares_to_issue", displayLabel: "Total Shares to Issue", type: "computed", isComputed: true, displayOrder: 202, validation: { logicType: "formula", formula: "sum(founders.$.founder_shares)" }, expression: "auto" },
     ];
 
     for (const v of variables) {
@@ -445,111 +505,77 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
       });
     }
 
-    // Generate and upload the sample template
-    const JSZip = (await import("jszip")).default;
-    const zip = new JSZip();
-    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
-    const b = "<w:rPr><w:b/></w:rPr>";
-    const bLg = '<w:rPr><w:b/><w:sz w:val="36"/></w:rPr>';
-    const bMd = '<w:rPr><w:b/><w:sz w:val="28"/></w:rPr>';
-    const ctr = '<w:pPr><w:jc w:val="center"/></w:pPr>';
-    const p = (text: string, bold?: boolean, center?: boolean) =>
-      `<w:p>${center ? ctr : ""}<w:r>${bold ? b : ""}<w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+    // ── Upload converted templates and link to workflow ──
+    const templateFiles = [
+      { file: "certificate_of_incorporation.docx", name: "Certificate of Incorporation", desc: "Delaware C-Corp formation certificate", order: 1 },
+      { file: "action_of_incorporator.docx", name: "Action of Incorporator", desc: "Written consent appointing initial directors", order: 2 },
+      { file: "initial_bylaws.docx", name: "Initial Bylaws", desc: "Corporation bylaws adopted at formation", order: 3 },
+      { file: "organizational_board_consent.docx", name: "Organizational Board Consent", desc: "Board resolution authorizing officers, stock issuance, and initial actions", order: 4 },
+      { file: "ss4_authorization.docx", name: "SS-4 Authorization", desc: "Authorization for third-party designee to apply for EIN", order: 5 },
+      { file: "founder_rspa.docx", name: "Founder RSPA", desc: "Restricted Stock Purchase Agreement — generated per founder", order: 6, repeatOver: "founders" },
+      { file: "founder_eiaca.docx", name: "Founder EIACA", desc: "Employee Invention Assignment & Confidentiality Agreement — generated per founder", order: 7, repeatOver: "founders" },
+      { file: "founder_83b.docx", name: "83(b) Election", desc: "IRS Section 83(b) election form — generated per founder", order: 8, repeatOver: "founders" },
+    ];
 
-    const body = [
-      `<w:p>${ctr}<w:r>${bLg}<w:t>CERTIFICATE OF INCORPORATION</w:t></w:r></w:p>`,
-      `<w:p>${ctr}<w:r><w:t>of</w:t></w:r></w:p>`,
-      `<w:p>${ctr}<w:r>${bMd}<w:t>{{company_name}}</w:t></w:r></w:p>`,
-      "<w:p/>",
-      p("ARTICLE I - NAME", true),
-      p('The name of the corporation is {{company_name}} (the "Corporation").'),
-      "<w:p/>",
-      p("ARTICLE II - REGISTERED AGENT", true),
-      p("The address of the registered office of the Corporation in the State of {{state}} is {{registered_agent_address}}. The name of the registered agent at such address is {{registered_agent_name}}."),
-      "<w:p/>",
-      p("ARTICLE III - PURPOSE", true),
-      p("The purpose of the Corporation is to engage in {{business_purpose}}."),
-      "<w:p/>",
-      p("ARTICLE IV - AUTHORIZED STOCK", true),
-      p("The total number of shares of stock which the Corporation shall have authority to issue is {{authorized_shares}} shares of Common Stock, each having a par value of ${{par_value}} per share."),
-      "<w:p/>",
-      p("ARTICLE V - INCORPORATOR", true),
-      p("The name and mailing address of the incorporator is {{incorporator_name}}, {{incorporator_address}}."),
-      "<w:p/>",
-      p("{{#if has_indemnification}}"),
-      p("ARTICLE VI - INDEMNIFICATION", true),
-      p("The Corporation shall indemnify any person who was or is a party to any proceeding by reason of the fact that such person is or was a director or officer of the Corporation, to the fullest extent permitted by the General Corporation Law of the State of Delaware."),
-      p("{{/if}}"),
-      "<w:p/>",
-      p("INITIAL STOCKHOLDERS", true),
-      p("{{#each founders}}"),
-      p("{{@index}}. {{this.name}} ({{this.title}}) - {{this.shares}} shares - {{this.email}}"),
-      p("{{/each}}"),
-      "<w:p/>",
-      p("IN WITNESS WHEREOF, the undersigned incorporator has executed this Certificate of Incorporation on {{formation_date}}."),
-      "<w:p/>", "<w:p/>",
-      p("_____________________________"),
-      p("{{incorporator_name}}, Incorporator"),
-    ].join("");
-
-    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body}</w:body></w:document>`;
-    const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
-    const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>';
-    const wordRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
-
-    zip.file("[Content_Types].xml", contentTypes);
-    zip.file("_rels/.rels", rels);
-    zip.file("word/_rels/document.xml.rels", wordRels);
-    zip.file("word/document.xml", documentXml);
-
-    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
-
-    // Upload template to storage
-    const storagePath = `templates/${orgId}/${workflow.id}/cert_of_incorporation.docx`;
     const { parseTemplate } = await import("../engines/word");
-    const schema = await parseTemplate(buffer);
 
-    await supabase.storage.from("draft-documents").upload(storagePath, buffer, {
-      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      upsert: true,
-    });
+    for (const tmpl of templateFiles) {
+      // Read template from bundled templates directory
+      const templatePath = path.resolve(__dirname, "../../templates", tmpl.file);
+      let buffer: Buffer;
+      try {
+        buffer = fs.readFileSync(templatePath);
+      } catch {
+        // If template file not found, skip it with a warning
+        console.warn(`Template file not found: ${templatePath}`);
+        continue;
+      }
 
-    // Create template record
-    const template = await prisma.template.create({
-      data: {
-        orgId,
-        name: "Certificate of Incorporation",
-        description: "Delaware C-Corporation formation document with conditional indemnification and founder listing",
-        format: "docx",
-        filePath: storagePath,
-        parsedSchema: schema as any,
-      },
-    });
+      const storagePath = `templates/${orgId}/${workflow.id}/${tmpl.file}`;
+      const schema = await parseTemplate(buffer);
 
-    await prisma.templateVersion.create({
-      data: {
-        templateId: template.id,
-        versionNumber: 1,
-        filePath: storagePath,
-        fileHash: "",
-        parsedSchema: schema as any,
-        changeNote: "Auto-generated demo template",
-        createdBy: req.auth!.userId,
-      },
-    });
+      await supabase.storage.from("draft-documents").upload(storagePath, buffer, {
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        upsert: true,
+      });
 
-    // Link template to workflow
-    await prisma.workflowTemplate.create({
-      data: {
-        workflowId: workflow.id,
-        templateId: template.id,
-        displayOrder: 1,
-      },
-    });
+      const template = await prisma.template.create({
+        data: {
+          orgId,
+          name: tmpl.name,
+          description: tmpl.desc,
+          format: "docx",
+          filePath: storagePath,
+          parsedSchema: schema as any,
+        },
+      });
+
+      await prisma.templateVersion.create({
+        data: {
+          templateId: template.id,
+          versionNumber: 1,
+          filePath: storagePath,
+          fileHash: "",
+          parsedSchema: schema as any,
+          changeNote: "Converted from Gavel template",
+          createdBy: req.auth!.userId,
+        },
+      });
+
+      // Link to workflow with optional repeatOver
+      await prisma.workflowTemplate.create({
+        data: {
+          workflowId: workflow.id,
+          templateId: template.id,
+          displayOrder: tmpl.order,
+          variableMapping: tmpl.repeatOver ? { repeatOver: tmpl.repeatOver } : {},
+        },
+      });
+    }
 
     res.status(201).json({
       workflow,
-      message: "Demo workflow created with 5 pages, 16 questions, 3 logic variables, 1 template (Certificate of Incorporation). Go to the workflow builder to explore, or create a matter to test generation.",
+      message: `Demo workflow "Delaware Incorporation" created with 8 interview pages, ${variables.length} questions/variables, and ${templateFiles.length} document templates (including 3 per-founder). Delete existing demo workflows first if re-seeding.`,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
