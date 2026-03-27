@@ -212,12 +212,12 @@ function processRepeatingBlocks(xml: string, values: Record<string, any>): strin
           .map((item, index) => {
             let itemContent = template;
 
-            // Replace {{this.field}} with actual values
+            // Replace {{this.field}} or {{this.field|format}} with actual values
             itemContent = itemContent.replace(
-              /\{\{this\.([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g,
-              (_, field) => {
+              /\{\{this\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\|([a-zA-Z_]+)(?::([^}]*))?)?\}\}/g,
+              (_, field, fmt, fmtArg) => {
                 const val = item[field];
-                return val !== undefined && val !== null ? String(val) : "";
+                return escapeXml(applyFormat(val, fmt, fmtArg));
               }
             );
 
@@ -244,12 +244,17 @@ function processRepeatingBlocks(xml: string, values: Record<string, any>): strin
   return result;
 }
 
-// ── Variable Replacement ──
+// ── Variable Replacement with Format Modifiers ──
 
 /**
- * Replace {{variable_name}} with actual values.
- * In "live" mode, wraps each replacement in an SDT for the add-in.
- * In "final" mode, inserts plain text.
+ * Replace {{variable_name}} or {{variable_name|format}} or {{variable_name|format:arg}}.
+ * 
+ * Supported format modifiers (pipe syntax in templates):
+ *   TEXT:   upper, lower, title, capitalize, initials
+ *   NUMBER: currency, number, number:2, ordinal, percent, percent:0, words
+ *   DATE:   long, short, iso, year, month, day
+ *   LIST:   join, join:and, count
+ *   BOOL:   yesno, truefalse
  */
 function replaceVariables(
   xml: string,
@@ -258,19 +263,109 @@ function replaceVariables(
   tagRegistry: Record<string, string>
 ): string {
   return xml.replace(
-    /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)\}\}/g,
-    (fullMatch, varName) => {
-      // Skip any remaining control flow markers
-      if (varName.startsWith("#") || varName.startsWith("/")) return fullMatch;
-
+    /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)(?:\|([a-zA-Z_]+)(?::([^}]*))?)?\}\}/g,
+    (fullMatch, varName, format, formatArg) => {
+      if (varName.startsWith("#") || varName.startsWith("/") || varName.startsWith("@")) return fullMatch;
       const value = resolveValue(varName, values);
-      const displayValue = value !== undefined && value !== null ? String(value) : "";
-
-      // Always plain text for now — SDT wrapping re-enabled with Word Add-In
-      return escapeXml(displayValue);
+      return escapeXml(applyFormat(value, format, formatArg));
     }
   );
 }
+
+function applyFormat(value: any, format: string | undefined, arg: string | undefined): string {
+  if (value === undefined || value === null) return "";
+  const str = String(value);
+  if (!format) return str;
+
+  switch (format.toLowerCase()) {
+    // Text
+    case "upper": case "uppercase": return str.toUpperCase();
+    case "lower": case "lowercase": return str.toLowerCase();
+    case "title": case "titlecase": return str.replace(/\b\w/g, c => c.toUpperCase());
+    case "capitalize": case "cap": return str.charAt(0).toUpperCase() + str.slice(1);
+    case "initials": return str.split(/\s+/).map(w => w.charAt(0).toUpperCase() + ".").join("");
+
+    // Numbers
+    case "currency": case "usd": {
+      const num = Number(value); if (isNaN(num)) return str;
+      const dec = arg !== undefined ? Number(arg) : 2;
+      return "$" + num.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    }
+    case "number": case "num": case "comma": case "formatted": {
+      const num = Number(value); if (isNaN(num)) return str;
+      const dec = arg !== undefined ? Number(arg) : 0;
+      return num.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    }
+    case "ordinal": case "ord": {
+      const n = Number(value); if (isNaN(n)) return str;
+      const s = ["th","st","nd","rd"]; const v = Math.abs(n) % 100;
+      return n + (s[(v-20)%10] || s[v] || s[0]);
+    }
+    case "percent": case "pct": {
+      const num = Number(value); if (isNaN(num)) return str;
+      const dec = arg !== undefined ? Number(arg) : 1;
+      return num.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec }) + "%";
+    }
+    case "words": case "spelled": {
+      const num = Number(value); if (isNaN(num)) return str;
+      return numberToWords(num);
+    }
+
+    // Dates
+    case "long": case "datelong": { const d = parseDate(value); return d ? d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }) : str; }
+    case "short": case "dateshort": { const d = parseDate(value); return d ? d.toLocaleDateString("en-US", { year: "numeric", month: "2-digit", day: "2-digit" }) : str; }
+    case "iso": { const d = parseDate(value); return d ? d.toISOString().slice(0,10) : str; }
+    case "year": { const d = parseDate(value); return d ? String(d.getFullYear()) : str; }
+    case "month": { const d = parseDate(value); return d ? d.toLocaleDateString("en-US", { month: "long" }) : str; }
+    case "day": { const d = parseDate(value); return d ? String(d.getDate()) : str; }
+
+    // Lists
+    case "join": {
+      if (!Array.isArray(value)) return str;
+      if (arg && arg.trim()) {
+        const sep = arg.trim();
+        if (value.length <= 1) return value.join("");
+        if (value.length === 2) return value.join(` ${sep} `);
+        return value.slice(0,-1).join(", ") + `, ${sep} ` + value[value.length-1];
+      }
+      return value.join(", ");
+    }
+    case "count": return Array.isArray(value) ? String(value.length) : str;
+
+    // Booleans
+    case "yesno": return value === true || value === "true" || value === "Yes" ? "Yes" : "No";
+    case "truefalse": return value === true || value === "true" || value === "Yes" ? "True" : "False";
+
+    default: return str;
+  }
+}
+
+function parseDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function numberToWords(n: number): string {
+  if (n === 0) return "zero";
+  const ones = ["","one","two","three","four","five","six","seven","eight","nine","ten",
+    "eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen"];
+  const tens = ["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"];
+  const scales = ["","thousand","million","billion","trillion"];
+  if (n < 0) return "negative " + numberToWords(-n);
+  if (n < 20) return ones[n];
+  if (n < 100) return tens[Math.floor(n/10)] + (n%10 ? "-" + ones[n%10] : "");
+  if (n < 1000) return ones[Math.floor(n/100)] + " hundred" + (n%100 ? " " + numberToWords(n%100) : "");
+  let result = ""; let si = 0; let rem = Math.floor(n);
+  while (rem > 0) {
+    const chunk = rem % 1000;
+    if (chunk > 0) { const cw = numberToWords(chunk); result = cw + (scales[si] ? " " + scales[si] : "") + (result ? " " + result : ""); }
+    rem = Math.floor(rem / 1000); si++;
+  }
+  return result.trim();
+}
+
 
 /**
  * Update existing SDT content with new variable values.

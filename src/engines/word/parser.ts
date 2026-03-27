@@ -114,12 +114,12 @@ export function extractMustacheVariables(documentXml: string): ParsedVariable[] 
   // We look for {{ and }} patterns in the full text content
   const allText = extractAllText(documentXml);
 
-  // Simple variable: {{variable_name}}
-  const simplePattern = /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)\}\}/g;
+  // Simple variable: {{variable_name}} or {{variable_name|format}} or {{variable_name|format:arg}}
+  const simplePattern = /\{\{([a-zA-Z_][a-zA-Z0-9_.$]*)(?:\|[^}]*)?\}\}/g;
   let match;
 
   while ((match = simplePattern.exec(allText)) !== null) {
-    const name = match[1];
+    const name = match[1]; // Strip format modifier — just the variable name
 
     // Skip control flow markers
     if (name.startsWith("#") || name.startsWith("/") || name === "this") continue;

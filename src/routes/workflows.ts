@@ -555,3 +555,37 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+// ── Delete workflow ──
+workflowRoutes.delete("/:id", requireRole("editor"), async (req, res) => {
+  try {
+    const { orgId } = getScope(req);
+
+    const workflow = await prisma.workflow.findFirst({
+      where: { id: req.params.id, orgId },
+      include: { _count: { select: { matters: true } } },
+    });
+
+    if (!workflow) return res.status(404).json({ error: "Workflow not found" });
+
+    if (workflow._count.matters > 0) {
+      return res.status(400).json({
+        error: `Cannot delete: ${workflow._count.matters} matter(s) use this workflow. Archive or delete the matters first.`,
+      });
+    }
+
+    // Cascade: delete variables, sections, template links (not templates themselves)
+    await prisma.$transaction([
+      prisma.workflowTemplate.deleteMany({ where: { workflowId: workflow.id } }),
+      prisma.variable.deleteMany({ where: { workflowId: workflow.id } }),
+      prisma.interviewSection.deleteMany({ where: { workflowId: workflow.id } }),
+      prisma.workflow.delete({ where: { id: workflow.id } }),
+    ]);
+
+    await auditLog(orgId, req.auth!.userId, "workflow.deleted", "workflow", workflow.id, { name: workflow.name });
+
+    res.json({ deleted: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
