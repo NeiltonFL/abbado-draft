@@ -360,7 +360,6 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
         name: "Delaware Corporation Formation",
         description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation with conditional indemnification and repeating founder blocks.",
         category: "Corporate Formation",
-        status: "active",
       },
     });
 
