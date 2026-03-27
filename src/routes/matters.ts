@@ -381,3 +381,137 @@ matterRoutes.patch("/:id/documents/:docId/conflicts/:conflictId", requireRole("u
     res.status(400).json({ error: err.message });
   }
 });
+
+// ── Upload edited document (re-upload after manual edits in Word) ──
+matterRoutes.post("/:id/documents/:docId/upload-edited", requireRole("user"), async (req, res) => {
+  try {
+    const { orgId } = getScope(req);
+    const { fileBase64 } = req.body;
+
+    if (!fileBase64) return res.status(400).json({ error: "fileBase64 is required" });
+
+    const genDoc = await prisma.generatedDocument.findFirst({
+      where: { id: req.params.docId, matter: { id: req.params.id, orgId } },
+      include: { template: true },
+    });
+
+    if (!genDoc) return res.status(404).json({ error: "Generated document not found" });
+
+    const buffer = Buffer.from(fileBase64, "base64");
+    const JSZip = (await import("jszip")).default;
+
+    // Extract text content from the uploaded document
+    const zip = await JSZip.loadAsync(buffer);
+    const docXmlFile = zip.file("word/document.xml");
+    if (!docXmlFile) return res.status(400).json({ error: "Invalid .docx file" });
+    const docXml = await docXmlFile.async("string");
+
+    // Extract all text runs
+    const uploadedText = extractAllText(docXml);
+
+    // Get the original generation's text for comparison
+    let originalText = "";
+    if (genDoc.filePath) {
+      const { supabase } = await import("../lib/supabase");
+      const { data } = await supabase.storage.from("draft-documents").download(genDoc.filePath);
+      if (data) {
+        const origBuf = Buffer.from(await data.arrayBuffer());
+        const origZip = await JSZip.loadAsync(origBuf);
+        const origDocFile = origZip.file("word/document.xml");
+        if (origDocFile) {
+          const origXml = await origDocFile.async("string");
+          originalText = extractAllText(origXml);
+        }
+      }
+    }
+
+    // Compare paragraph-by-paragraph
+    const origParagraphs = originalText.split("\n").filter(p => p.trim());
+    const uploadParagraphs = uploadedText.split("\n").filter(p => p.trim());
+
+    const changes: { type: string; original?: string; edited?: string; position: number }[] = [];
+
+    // Find modified and deleted paragraphs
+    const maxLen = Math.max(origParagraphs.length, uploadParagraphs.length);
+    for (let i = 0; i < maxLen; i++) {
+      const orig = origParagraphs[i] || "";
+      const upld = uploadParagraphs[i] || "";
+      if (orig !== upld) {
+        if (!orig && upld) {
+          changes.push({ type: "INSERTED", edited: upld, position: i });
+        } else if (orig && !upld) {
+          changes.push({ type: "DELETED", original: orig, position: i });
+        } else {
+          changes.push({ type: "MODIFIED", original: orig, edited: upld, position: i });
+        }
+      }
+    }
+
+    // Store the edited file
+    const { supabase } = await import("../lib/supabase");
+    const editedPath = `generated/${genDoc.matterId}/${genDoc.templateId}/edited_${Date.now()}.docx`;
+    await supabase.storage.from("draft-documents").upload(editedPath, buffer, {
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      upsert: true,
+    });
+
+    // Create edit journal entries for each change
+    const entries = [];
+    for (const change of changes) {
+      const entry = await prisma.editJournalEntry.create({
+        data: {
+          generatedDocumentId: genDoc.id,
+          operationType: change.type === "INSERTED" ? "INSERT_AFTER" : change.type === "DELETED" ? "DELETE" : "MODIFY",
+          anchorTag: `para_${change.position}`,
+          contentXml: change.edited || null,
+          label: change.type === "MODIFIED"
+            ? `Changed: "${(change.original || "").slice(0, 50)}..." → "${(change.edited || "").slice(0, 50)}..."`
+            : change.type === "INSERTED"
+            ? `Added: "${(change.edited || "").slice(0, 80)}..."`
+            : `Removed: "${(change.original || "").slice(0, 80)}..."`,
+          status: "active",
+          createdBy: req.auth!.userId,
+        },
+      });
+      entries.push(entry);
+    }
+
+    // Update the generated document with the edited file path
+    await prisma.generatedDocument.update({
+      where: { id: genDoc.id },
+      data: { filePath: editedPath, updatedAt: new Date() },
+    });
+
+    // Log activity
+    await auditLog(orgId, req.auth!.userId, "document.edited", "generated_document", genDoc.id, {
+      changeCount: changes.length,
+      editedPath,
+    });
+
+    res.json({
+      editedPath,
+      changeCount: changes.length,
+      changes,
+      journalEntries: entries.length,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+function extractAllText(xml: string): string {
+  const paragraphs: string[] = [];
+  const pPattern = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
+  let pMatch;
+  while ((pMatch = pPattern.exec(xml)) !== null) {
+    const pContent = pMatch[1];
+    const texts: string[] = [];
+    const tPattern = /<w:t[^>]*>([^<]*)<\/w:t>/g;
+    let tMatch;
+    while ((tMatch = tPattern.exec(pContent)) !== null) {
+      texts.push(tMatch[1]);
+    }
+    paragraphs.push(texts.join(""));
+  }
+  return paragraphs.join("\n");
+}

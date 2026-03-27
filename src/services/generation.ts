@@ -244,7 +244,10 @@ export async function regenerateDocuments(
 
   if (!matter) throw new Error("Matter not found");
 
-  const values = (matter.variableValues as Record<string, any>) || {};
+  // Load workflow variables for preprocessing
+  const wfVars = await prisma.variable.findMany({ where: { workflowId: matter.workflowId } });
+  const rawValues = (matter.variableValues as Record<string, any>) || {};
+  const values = preprocessValues(rawValues, wfVars);
   const results = [];
 
   for (const doc of matter.generatedDocs) {
