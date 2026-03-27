@@ -131,6 +131,22 @@ workflowRoutes.delete("/:id/templates/:wtId", requireRole("editor"), async (req,
   }
 });
 
+// ── Update template variable mapping (includes document conditions) ──
+workflowRoutes.patch("/:id/templates/:wtId/mapping", requireRole("editor"), async (req, res) => {
+  try {
+    const { variableMapping } = req.body;
+
+    const wt = await prisma.workflowTemplate.update({
+      where: { id: req.params.wtId },
+      data: { variableMapping },
+    });
+
+    res.json(wt);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ── Update variables (bulk) ──
 workflowRoutes.put("/:id/variables", requireRole("editor"), async (req, res) => {
   try {
