@@ -25,15 +25,24 @@ export interface GenerationResult {
  * Supports: ==, !=, >, <, >=, <=, truthy checks
  */
 function evaluateCondition(expression: string, values: Record<string, any>, currentItem?: any): boolean {
-  const compMatch = expression.match(/^(\S+)\s*(==|!=|>=|<=|>|<)\s*["']?([^"']*)["']?$/);
+  // Unescape XML entities — conditions come from raw XML where quotes are &quot;
+  let expr = expression
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&apos;/g, "'");
+
+  // Match: varName operator "value" or varName operator value
+  const compMatch = expr.match(/^(\S+)\s*(==|!=|>=|<=|>|<)\s*["']?([^"']*)["']?\s*$/);
 
   if (compMatch) {
     const [, varName, operator, compareValue] = compMatch;
     const actualValue = resolveValue(varName, values, currentItem);
 
     switch (operator) {
-      case "==": return String(actualValue) === compareValue;
-      case "!=": return String(actualValue) !== compareValue;
+      case "==": return String(actualValue ?? "") === compareValue;
+      case "!=": return String(actualValue ?? "") !== compareValue;
       case ">": return Number(actualValue) > Number(compareValue);
       case "<": return Number(actualValue) < Number(compareValue);
       case ">=": return Number(actualValue) >= Number(compareValue);
@@ -43,7 +52,7 @@ function evaluateCondition(expression: string, values: Record<string, any>, curr
   }
 
   // Truthy check
-  const val = resolveValue(expression.trim(), values, currentItem);
+  const val = resolveValue(expr.trim(), values, currentItem);
   return Boolean(val) && val !== "false" && val !== "0" && val !== "";
 }
 
