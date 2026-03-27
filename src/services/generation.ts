@@ -116,6 +116,7 @@ export async function generateAllDocuments(
         // ── Per-item repeating: generate one document per collection item ──
         const repeatOver = mapping?.repeatOver as string | undefined;
         const items = repeatOver ? (values[repeatOver] as any[]) : null;
+        const outputNameTemplate = mapping?.outputName as string | undefined;
 
         if (repeatOver && Array.isArray(items) && items.length > 0) {
           // Generate one document per item
@@ -144,9 +145,10 @@ export async function generateAllDocuments(
 
             const genResult = await generateDocument(templateBuffer, itemValues, options);
 
-            // Name: "RSPA - John Smith" using the first text field of the item
-            const itemLabel = item.name || item.founder_name || item.title || `Item ${idx + 1}`;
-            const storagePath = `generated/${matter.id}/${template.id}/${mode}_${idx}_${Date.now()}.docx`;
+            // Resolve output name from template or fallback
+            const displayName = resolveOutputName(outputNameTemplate, itemValues, template.name, item);
+            const safeFileName = displayName.replace(/[^a-zA-Z0-9_\-. ]/g, "").replace(/\s+/g, "_").slice(0, 100);
+            const storagePath = `generated/${matter.id}/${template.id}/${safeFileName}_${idx}_${Date.now()}.docx`;
             const { error: uploadError } = await supabase.storage
               .from("draft-documents")
               .upload(storagePath, genResult.buffer, {
@@ -163,7 +165,7 @@ export async function generateAllDocuments(
                 matterId: matter.id,
                 templateId: template.id,
                 filePath: storagePath,
-                variableSnapshot: { ...genResult.variableSnapshot, _displayName: `${template.name} - ${itemLabel}` },
+                variableSnapshot: { ...genResult.variableSnapshot, _displayName: displayName },
                 structuralTagRegistry: genResult.structuralTagRegistry,
                 generationHash: genResult.generationHash,
                 mode,
@@ -172,7 +174,7 @@ export async function generateAllDocuments(
 
             results.documents.push({
               id: genDoc.id,
-              templateName: `${template.name} - ${itemLabel}`,
+              templateName: displayName,
               templateFormat: template.format,
               filePath: storagePath,
               mode,
@@ -189,8 +191,9 @@ export async function generateAllDocuments(
 
           const genResult = await generateDocument(templateBuffer, values, options);
 
-          // Store generated document in Supabase Storage
-          const storagePath = `generated/${matter.id}/${template.id}/${mode}_${Date.now()}.docx`;
+          const displayName = resolveOutputName(outputNameTemplate, values, template.name);
+          const safeFileName = displayName.replace(/[^a-zA-Z0-9_\-. ]/g, "").replace(/\s+/g, "_").slice(0, 100);
+          const storagePath = `generated/${matter.id}/${template.id}/${safeFileName}_${Date.now()}.docx`;
           const { error: uploadError } = await supabase.storage
             .from("draft-documents")
             .upload(storagePath, genResult.buffer, {
@@ -208,7 +211,7 @@ export async function generateAllDocuments(
               matterId: matter.id,
               templateId: template.id,
               filePath: storagePath,
-              variableSnapshot: genResult.variableSnapshot,
+              variableSnapshot: { ...genResult.variableSnapshot, _displayName: displayName },
               structuralTagRegistry: genResult.structuralTagRegistry,
               generationHash: genResult.generationHash,
               mode,
@@ -217,7 +220,7 @@ export async function generateAllDocuments(
 
           results.documents.push({
             id: genDoc.id,
-            templateName: template.name,
+            templateName: displayName,
             templateFormat: template.format,
             filePath: storagePath,
             mode,
@@ -728,6 +731,54 @@ function preprocessValues(
   }
 
   return result;
+}
+
+/**
+ * Resolve an output name template string like "{{company_name}} - RSPA - {{this.founder_name}}"
+ * against the current values. Falls back to template name + item label.
+ */
+function resolveOutputName(
+  template: string | undefined,
+  values: Record<string, any>,
+  fallbackName: string,
+  item?: Record<string, any>
+): string {
+  if (!template) {
+    // Default: template name + first recognizable item label (for per-item docs)
+    if (item) {
+      const label = item.name || item.founder_name || item.title || "";
+      return label ? `${fallbackName} - ${label}` : fallbackName;
+    }
+    return fallbackName;
+  }
+
+  // Replace {{variable}} placeholders with values
+  return template.replace(/\{\{([^}]+)\}\}/g, (_, varExpr) => {
+    const varName = varExpr.trim();
+
+    // this.field → look in item first
+    if (varName.startsWith("this.") && item) {
+      const field = varName.slice(5);
+      return String(item[field] ?? "");
+    }
+
+    // Direct lookup
+    const val = values[varName];
+    if (val !== undefined && val !== null) return String(val);
+
+    // Dot notation
+    if (varName.includes(".")) {
+      const parts = varName.split(".");
+      let current: any = values;
+      for (const part of parts) {
+        if (current === undefined || current === null) return "";
+        current = current[part];
+      }
+      return String(current ?? "");
+    }
+
+    return "";
+  }).trim() || fallbackName;
 }
 
 function formatAddress(addr: any): string {

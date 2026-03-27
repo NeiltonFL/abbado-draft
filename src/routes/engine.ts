@@ -164,9 +164,11 @@ engineRoutes.get("/download/:docId", async (req, res) => {
       return res.status(500).json({ error: "Failed to generate download URL" });
     }
 
+    const displayName = (genDoc.variableSnapshot as any)?._displayName || genDoc.template.name;
+
     res.json({
       url: data.signedUrl,
-      fileName: `${genDoc.template.name}.${genDoc.template.format}`,
+      fileName: `${displayName}.${genDoc.template.format}`,
       expiresIn: 300,
     });
   } catch (err: any) {
