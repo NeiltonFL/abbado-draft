@@ -534,7 +534,35 @@ function preprocessValues(
     }
   }
 
-  // ── Third pass: Compute derived values for templates ──
+  // ── Third pass: Unpack address objects into flat fields for templates ──
+
+  // Company address: {{company_street}}, {{company_number}}, {{company_city}}, etc.
+  if (result.company_address && typeof result.company_address === "string") {
+    // preprocessValues first pass already converted address object to formatted string
+    // We need the original object — check raw data
+  }
+  const rawCompanyAddr = raw.company_address;
+  if (rawCompanyAddr && typeof rawCompanyAddr === "object") {
+    result.company_street = rawCompanyAddr.street || "";
+    result.company_number = rawCompanyAddr.street2 || "";
+    result.company_city = rawCompanyAddr.city || "";
+    result.company_state = rawCompanyAddr.state || "";
+    result.company_zip = rawCompanyAddr.zip || "";
+    result.company_country = rawCompanyAddr.country || "United States";
+  }
+
+  // Incorporator address: {{incorporator_street}}, {{incorporator_city}}, etc.
+  const rawIncorpAddr = raw.incorporator_address;
+  if (rawIncorpAddr && typeof rawIncorpAddr === "object") {
+    result.incorporator_street = rawIncorpAddr.street || "";
+    result.incorporator_number = rawIncorpAddr.street2 || "";
+    result.incorporator_city = rawIncorpAddr.city || "";
+    result.incorporator_state = rawIncorpAddr.state || "";
+    result.incorporator_zip = rawIncorpAddr.zip || "";
+    result.incorporator_country = rawIncorpAddr.country || "United States";
+  }
+
+  // ── Fourth pass: Compute derived values for templates ──
 
   // Enrich each founder in the founders array with computed fields
   if (Array.isArray(result.founders)) {
@@ -552,6 +580,50 @@ function preprocessValues(
       founder.founder_cliff_percent = timeline > 0 ? Math.round((cliff / timeline) * 100) : 0;
       founder.founder_vesting_timeline_divisible_by_12 = timeline > 0 && timeline % 12 === 0 ? "true" : "false";
       founder.founder_vesting_cliff_divisible_by_12 = cliff > 0 && cliff % 12 === 0 ? "true" : "false";
+
+      // Auto-populate vesting details from preset schedule selections
+      // When a preset is chosen, the detail fields are hidden in the interview,
+      // but templates still need the values
+      if (founder.founder_vesting_schedule === "Monthly, over 48 months with a 1-year cliff") {
+        founder.founder_vesting_timeline = founder.founder_vesting_timeline || 48;
+        founder.founder_vesting_recurrence = founder.founder_vesting_recurrence || "Monthly";
+        founder.founder_vesting_cliff_yn = "true";
+        founder.founder_vesting_cliff = founder.founder_vesting_cliff || 12;
+        // Recompute derived values with populated fields
+        const tl = 48, cl = 12;
+        founder.founder_vesting_years = 4;
+        founder.founder_vesting_cliff_years = 1;
+        founder.founder_vesting_half_years = 8;
+        founder.founder_vesting_quarters = 16;
+        founder.founder_cliff_percent = 25;
+        founder.founder_vesting_timeline_divisible_by_12 = "true";
+        founder.founder_vesting_cliff_divisible_by_12 = "true";
+      } else if (founder.founder_vesting_schedule === "Monthly, over 48 months with no cliff") {
+        founder.founder_vesting_timeline = founder.founder_vesting_timeline || 48;
+        founder.founder_vesting_recurrence = founder.founder_vesting_recurrence || "Monthly";
+        founder.founder_vesting_cliff_yn = "false";
+        founder.founder_vesting_cliff = 0;
+        founder.founder_vesting_years = 4;
+        founder.founder_vesting_cliff_years = 0;
+        founder.founder_vesting_half_years = 8;
+        founder.founder_vesting_quarters = 16;
+        founder.founder_cliff_percent = 0;
+        founder.founder_vesting_timeline_divisible_by_12 = "true";
+      }
+
+      // Unpack founder_address object into flat fields for templates
+      // Templates use {{founder_street}}, {{founder_city}}, etc.
+      const addr = founder.founder_address;
+      if (addr && typeof addr === "object") {
+        founder.founder_street = addr.street || "";
+        founder.founder_number = addr.street2 || "";
+        founder.founder_city = addr.city || "";
+        founder.founder_state = addr.state || "";
+        founder.founder_zip = addr.zip || "";
+        founder.founder_country = addr.country || "United States";
+        // Also store formatted string version
+        founder.founder_address = formatAddress(addr);
+      }
 
       // Normalize booleans inside founder objects
       for (const key of ["board_yn", "founder_addroles_yn", "founder_vesting_schedule_yn", "founder_vesting_cliff_yn"]) {
