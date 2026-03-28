@@ -355,33 +355,34 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
     const fs = await import("fs");
     const path = await import("path");
 
-    // Create workflow
-    const workflow = await prisma.workflow.create({
-      data: {
-        orgId,
-        name: "Delaware Incorporation",
-        description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation, Action of Incorporator, Initial Bylaws, Organizational Board Consent, SS-4 Authorization, and per-founder RSPA, EIACA, and 83(b) Election documents.",
-        category: "Corporate Formation",
-      },
-    });
-
-    // ── Interview Sections (pages grouped into sidebar sections) ──
-    const sections = [
-      { name: "Company Information", description: JSON.stringify({ section: "Company Details", text: "Basic information about the corporation being formed." }), displayOrder: 0 },
-      { name: "Company Address", description: JSON.stringify({ section: "Company Details", text: "Principal office address for the corporation." }), displayOrder: 1 },
-      { name: "Registered Agent", description: JSON.stringify({ section: "Company Details", text: "The registered agent receives legal documents on behalf of the corporation in Delaware." }), displayOrder: 2 },
-      { name: "Stock Structure", description: JSON.stringify({ section: "Equity", text: "Define the authorized shares for the corporation." }), displayOrder: 3 },
-      { name: "Founders", description: JSON.stringify({ section: "Equity", text: "Add each founder with their share allocation, vesting, and roles." }), displayOrder: 4 },
-      { name: "Officers", description: JSON.stringify({ section: "Leadership", text: "Designate the CEO, Secretary, and any additional officers or directors." }), displayOrder: 5 },
-      { name: "Incorporator", description: JSON.stringify({ section: "Filing", text: "The person who signs and files the Certificate of Incorporation." }), displayOrder: 6 },
-      { name: "Designee", description: JSON.stringify({ section: "Filing", text: "Third-party designee authorized to apply for the EIN." }), displayOrder: 7 },
-    ];
-
-    for (const s of sections) {
-      await prisma.interviewSection.create({
-        data: { workflowId: workflow.id, ...s },
+    // ── Create workflow + sections + variables in a single transaction ──
+    // (PgBouncer can route sequential queries to different connections,
+    //  causing FK violations if the workflow isn't visible yet)
+    const workflow = await prisma.$transaction(async (tx) => {
+      const wf = await tx.workflow.create({
+        data: {
+          orgId,
+          name: "Delaware Incorporation",
+          description: "Complete workflow for incorporating a Delaware C-Corporation. Generates Certificate of Incorporation, Action of Incorporator, Initial Bylaws, Organizational Board Consent, SS-4 Authorization, and per-founder RSPA, EIACA, and 83(b) Election documents.",
+          category: "Corporate Formation",
+        },
       });
-    }
+
+      // ── Interview Sections ──
+      const sections = [
+        { name: "Company Information", description: JSON.stringify({ section: "Company Details", text: "Basic information about the corporation being formed." }), displayOrder: 0 },
+        { name: "Company Address", description: JSON.stringify({ section: "Company Details", text: "Principal office address for the corporation." }), displayOrder: 1 },
+        { name: "Registered Agent", description: JSON.stringify({ section: "Company Details", text: "The registered agent receives legal documents on behalf of the corporation in Delaware." }), displayOrder: 2 },
+        { name: "Stock Structure", description: JSON.stringify({ section: "Equity", text: "Define the authorized shares for the corporation." }), displayOrder: 3 },
+        { name: "Founders", description: JSON.stringify({ section: "Equity", text: "Add each founder with their share allocation, vesting, and roles." }), displayOrder: 4 },
+        { name: "Officers", description: JSON.stringify({ section: "Leadership", text: "Designate the CEO, Secretary, and any additional officers or directors." }), displayOrder: 5 },
+        { name: "Incorporator", description: JSON.stringify({ section: "Filing", text: "The person who signs and files the Certificate of Incorporation." }), displayOrder: 6 },
+        { name: "Designee", description: JSON.stringify({ section: "Filing", text: "Third-party designee authorized to apply for the EIN." }), displayOrder: 7 },
+      ];
+
+      for (const s of sections) {
+        await tx.interviewSection.create({ data: { workflowId: wf.id, ...s } });
+      }
 
     // ── Variables (interview questions + computed) ──
     const variables: any[] = [
@@ -477,9 +478,9 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
     ];
 
     for (const v of variables) {
-      await prisma.variable.create({
+      await tx.variable.create({
         data: {
-          workflowId: workflow.id,
+          workflowId: wf.id,
           name: v.name,
           displayLabel: v.displayLabel,
           type: v.type,
@@ -495,6 +496,9 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
         },
       });
     }
+
+      return wf;
+    }, { timeout: 30000 }); // end $transaction — 30s timeout for ~55 variable creates
 
     // ── Upload converted templates and link to workflow ──
     const ss4FieldMappings = [
