@@ -627,7 +627,7 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
 
     res.status(201).json({
       workflow,
-      message: `Demo workflow "Delaware Incorporation" created with 8 interview pages, ${variables.length} questions/variables, and ${templateFiles.length} document templates (including 3 per-founder + SS-4 PDF). Delete existing demo workflows first if re-seeding.`,
+      message: `Demo workflow "Delaware Incorporation" created with 8 interview pages, 9 document templates (including 3 per-founder + SS-4 PDF). Delete existing demo workflows first if re-seeding.`,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
