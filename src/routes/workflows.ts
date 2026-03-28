@@ -355,6 +355,17 @@ workflowRoutes.post("/seed-demo", requireRole("editor"), async (req, res) => {
     const fs = await import("fs");
     const path = await import("path");
 
+    // ── Check for existing demo workflow ──
+    const existing = await prisma.workflow.findFirst({
+      where: { orgId, name: "Delaware Incorporation" },
+    });
+    if (existing) {
+      return res.status(409).json({
+        error: "A 'Delaware Incorporation' workflow already exists. Delete it first before re-seeding.",
+        workflowId: existing.id,
+      });
+    }
+
     // ── Create workflow + sections + variables in a single transaction ──
     // (PgBouncer can route sequential queries to different connections,
     //  causing FK violations if the workflow isn't visible yet)
